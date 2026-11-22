@@ -9,3 +9,4 @@ outputs/
 data/clips/
 .env
 node_modules/
+.agent/
