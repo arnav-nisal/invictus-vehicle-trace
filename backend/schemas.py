@@ -423,3 +423,39 @@ class AnalysisResponse(BaseModel):
             "Strong match found: Rank 1 vehicle (MH12DE1432) has 98.5% confidence with exact plate match."
         ],
     )
+
+
+class AnalyzeRequest(BaseModel):
+    """Request payload for vehicle evidence analysis and registry matching."""
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    scenario_id: Optional[str] = Field(
+        default=None,
+        description="Optional ID of a pre-configured demo scenario (e.g., 'scenario-1', 'scenario-2').",
+        examples=["scenario-1"],
+    )
+    evidence: Optional[VehicleEvidence] = Field(
+        default=None,
+        description="Extracted visual and OCR evidence for a tracked vehicle.",
+    )
+    known_partial_plate: Optional[str] = Field(
+        default=None,
+        description="Optional investigator witness hint or known partial plate characters.",
+        examples=["MH12DE"],
+    )
+
+
+class DemoScenario(BaseModel):
+    """Pre-configured realistic demo scenario for rapid evaluation and testing."""
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    id: str = Field(..., description="Unique scenario slug or identifier.")
+    title: str = Field(..., description="Short descriptive title of the scenario.")
+    description: str = Field(..., description="Detailed briefing of the test scenario.")
+    evidence: VehicleEvidence = Field(..., description="Extracted vehicle evidence payload.")
+    suggested_known_partial_plate: Optional[str] = Field(
+        default=None,
+        description="Optional investigator partial plate hint.",
+    )
+    expected_outcome: str = Field(..., description="Summary of expected matching outcome.")
+

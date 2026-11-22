@@ -10,6 +10,8 @@ from .schemas import (
     ScoreBreakdown,
     MatchCandidate,
     AnalysisResponse,
+    AnalyzeRequest,
+    DemoScenario,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "ScoreBreakdown",
     "MatchCandidate",
     "AnalysisResponse",
+    "AnalyzeRequest",
+    "DemoScenario",
 ]
