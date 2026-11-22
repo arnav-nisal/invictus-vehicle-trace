@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pt
+*.onnx
+*.mp4
+*.avi
+outputs/
+data/clips/
+.env
+node_modules/
