@@ -6,14 +6,16 @@ import {
   VideoScanResponse,
 } from './types';
 
-const API_BASE = 'http://localhost:8000';
+// Use relative URL by default to leverage Vite's dev-server proxy and prevent CORS issues.
+// If VITE_API_BASE is provided in the environment, use it instead.
+const API_BASE = (import.meta as any)?.env?.VITE_API_BASE || '';
 
 export function resolveImageUrl(path?: string | null): string {
   if (!path) return '';
   if (path.startsWith('data:')) return path;
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
   const cleanPath = path.startsWith('/') ? path.slice(1) : path;
-  return `${API_BASE}/${cleanPath}`;
+  return API_BASE ? `${API_BASE}/${cleanPath}` : `/${cleanPath}`;
 }
 
 export async function getSystemHealth(): Promise<SystemHealth> {

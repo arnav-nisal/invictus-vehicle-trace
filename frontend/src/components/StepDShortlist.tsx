@@ -22,16 +22,18 @@ interface CharDiff {
   type: 'exact' | 'wildcard' | 'confusion' | 'mismatch';
 }
 
-function computeCharDiffs(observed: string, candidate: string): CharDiff[] {
+function computeCharDiffs(observed?: string | null, candidate?: string | null): CharDiff[] {
+  const obsStr = observed || '';
+  const candStr = candidate || '';
   const diffs: CharDiff[] = [];
-  const maxLen = Math.max(observed.length, candidate.length);
+  const maxLen = Math.max(obsStr.length, candStr.length);
 
   for (let i = 0; i < maxLen; i++) {
-    const obs = observed[i] || '';
-    const cand = candidate[i] || '';
+    const obs = obsStr[i] || '';
+    const cand = candStr[i] || '';
 
     if (obs === '?') {
-      diffs.push({ char: cand, obsChar: obs, type: 'wildcard' });
+      diffs.push({ char: cand || '?', obsChar: obs, type: 'wildcard' });
     } else if (obs === cand) {
       diffs.push({ char: cand, obsChar: obs, type: 'exact' });
     } else if (CONFUSION_PAIRS.has(`${obs}-${cand}`)) {
@@ -49,8 +51,10 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
     return null;
   }
 
-  const { top_matches, no_confident_match, explanation, evidence } = analysis;
-  const observedPlate = evidence.consensus_plate;
+  const topMatches = Array.isArray(analysis?.top_matches) ? analysis.top_matches : [];
+  const noConfidentMatch = analysis?.no_confident_match ?? false;
+  const explanation = analysis?.explanation || '';
+  const observedPlate = analysis?.evidence?.consensus_plate || '';
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 shadow-xl relative overflow-hidden">
@@ -78,7 +82,7 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
       </div>
 
       {/* Outcome Banner */}
-      {no_confident_match ? (
+      {noConfidentMatch ? (
         <div className="bg-rose-950/40 border-2 border-rose-600/80 rounded-xl p-5 mb-6 shadow-lg shadow-rose-950/30">
           <div className="flex items-start gap-3.5">
             <div className="w-10 h-10 rounded-lg bg-rose-900/60 border border-rose-700 flex items-center justify-center flex-shrink-0 text-rose-300">
@@ -150,17 +154,27 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
 
       {/* Ranked Candidate Cards */}
       <div className="space-y-4">
-        {top_matches.map((cand) => {
-          const isRank1 = cand.rank === 1 && !no_confident_match;
+        {topMatches.map((cand, idx) => {
+          if (!cand) return null;
+          const rankNum = cand.rank ?? idx + 1;
+          const isRank1 = rankNum === 1 && !noConfidentMatch;
           const diffs = computeCharDiffs(observedPlate, cand.plate_number);
-          const compositePct = (cand.composite_score * 100).toFixed(2);
-          const plateScorePct = (cand.score_breakdown.plate_score * 100).toFixed(1);
-          const colourScorePct = (cand.score_breakdown.colour_score * 100).toFixed(1);
-          const bodyScorePct = (cand.score_breakdown.body_type_score * 100).toFixed(1);
+          const compositePct = ((cand.composite_score ?? 0) * 100).toFixed(2);
+          const plateScorePct = (((cand.score_breakdown?.plate_score) ?? 0) * 100).toFixed(1);
+          const colourScorePct = (((cand.score_breakdown?.colour_score) ?? 0) * 100).toFixed(1);
+          const bodyScorePct = (((cand.score_breakdown?.body_type_score) ?? 0) * 100).toFixed(1);
+          const plateNum = cand.plate_number || 'UNKNOWN';
+          const makeText = cand.make || '';
+          const modelText = cand.model || '';
+          const colourText = cand.colour || '';
+          const bodyText = cand.body_type || '';
+          const rtoCityText = cand.rto_city || 'N/A';
+          const syntheticOwnerId = cand.synthetic_owner_id || 'SYN-OWN-xxxx';
+          const reasons = Array.isArray(cand.match_reasons) ? cand.match_reasons : [];
 
           return (
             <div
-              key={cand.plate_number}
+              key={plateNum || idx}
               className={`rounded-xl border p-5 transition-all ${
                 isRank1
                   ? 'bg-gradient-to-br from-slate-900 to-slate-850 border-cyan-500 ring-1 ring-cyan-500/40 shadow-xl shadow-cyan-950/40'
@@ -178,7 +192,7 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                         : 'bg-slate-800 text-slate-300 border border-slate-700'
                     }`}
                   >
-                    RANK #{cand.rank}
+                    RANK #{rankNum}
                   </span>
 
                   {/* Character-by-character diff chips */}
@@ -206,7 +220,7 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                   </div>
 
                   <span className="font-mono text-sm font-bold text-white tracking-wider">
-                    {cand.plate_number}
+                    {plateNum}
                   </span>
                 </div>
 
@@ -220,7 +234,7 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                       className={`font-mono text-lg font-black ${
                         isRank1
                           ? 'text-cyan-400'
-                          : no_confident_match
+                          : noConfidentMatch
                           ? 'text-rose-400'
                           : 'text-slate-300'
                       }`}
@@ -233,7 +247,7 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                       className={`h-full rounded-full ${
                         isRank1
                           ? 'bg-cyan-400'
-                          : no_confident_match
+                          : noConfidentMatch
                           ? 'bg-rose-500'
                           : 'bg-slate-500'
                       }`}
@@ -250,22 +264,22 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                   <div>
                     <span className="text-[10px] text-slate-500 block uppercase">MAKE & MODEL</span>
                     <span className="font-bold text-slate-200">
-                      {cand.make} {cand.model}
+                      {makeText} {modelText}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-slate-500 block uppercase">BODY & COLOUR</span>
                     <span className="font-bold text-slate-200 capitalize">
-                      {cand.colour} {cand.body_type}
+                      {colourText} {bodyText}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-slate-500 block uppercase">RTO JURISDICTION</span>
-                    <span className="text-slate-300">{cand.rto_city}</span>
+                    <span className="text-slate-300">{rtoCityText}</span>
                   </div>
                   <div>
                     <span className="text-[10px] text-slate-500 block uppercase">SYNTHETIC OWNER ID</span>
-                    <span className="text-cyan-400 font-semibold">{cand.synthetic_owner_id}</span>
+                    <span className="text-cyan-400 font-semibold">{syntheticOwnerId}</span>
                   </div>
                 </div>
 
@@ -307,8 +321,8 @@ export const StepDShortlist: React.FC<StepDShortlistProps> = ({ analysis }) => {
                   Algorithmic Match Reasoning:
                 </span>
                 <ul className="space-y-1">
-                  {cand.match_reasons.map((reason, idx) => (
-                    <li key={idx} className="text-xs text-slate-300 flex items-start gap-2">
+                  {reasons.map((reason, rIdx) => (
+                    <li key={rIdx} className="text-xs text-slate-300 flex items-start gap-2">
                       <span className="text-cyan-400 mt-0.5">•</span>
                       <span>{reason}</span>
                     </li>

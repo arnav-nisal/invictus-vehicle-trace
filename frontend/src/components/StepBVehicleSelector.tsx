@@ -21,7 +21,12 @@ export const StepBVehicleSelector: React.FC<StepBVehicleSelectorProps> = ({
     return null;
   }
 
-  const tracks = scanResult.tracks || [];
+  const tracks = Array.isArray(scanResult?.tracks) ? scanResult.tracks : [];
+  const durationSec = scanResult?.duration_seconds !== undefined && scanResult?.duration_seconds !== null
+    ? scanResult.duration_seconds.toFixed(1)
+    : '0.0';
+  const totalFrames = scanResult?.total_frames ?? 0;
+  const fps = scanResult?.fps ?? 30;
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 shadow-xl relative overflow-hidden">
@@ -44,27 +49,34 @@ export const StepBVehicleSelector: React.FC<StepBVehicleSelectorProps> = ({
         {/* Video stream statistics */}
         <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
           <span className="px-2 py-1 rounded bg-slate-800 border border-slate-700">
-            Duration: <strong className="text-slate-200">{scanResult.duration_seconds.toFixed(1)}s</strong>
+            Duration: <strong className="text-slate-200">{durationSec}s</strong>
           </span>
           <span className="px-2 py-1 rounded bg-slate-800 border border-slate-700">
-            Frames: <strong className="text-slate-200">{scanResult.total_frames}</strong>
+            Frames: <strong className="text-slate-200">{totalFrames}</strong>
           </span>
           <span className="px-2 py-1 rounded bg-slate-800 border border-slate-700">
-            FPS: <strong className="text-slate-200">{scanResult.fps}</strong>
+            FPS: <strong className="text-slate-200">{fps}</strong>
           </span>
         </div>
       </div>
 
       {/* Gallery of Detected Tracks */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {tracks.map((track) => {
-          const isSelected = selectedTrackId === track.track_id;
+        {tracks.map((track, idx) => {
+          if (!track) return null;
+          const trackId = track.track_id ?? idx + 1;
+          const isSelected = selectedTrackId === trackId;
           const imageUrl = resolveImageUrl(track.thumbnail_url);
-          const hasImageError = imageErrorMap[track.track_id];
+          const hasImageError = imageErrorMap[trackId];
+          const firstSec = track.first_sec ?? 0;
+          const lastSec = track.last_sec ?? 0;
+          const timeSpan = Math.max(0, lastSec - firstSec).toFixed(2);
+          const coarseClass = track.coarse_class || 'vehicle';
+          const framesSeen = track.frames_seen ?? 0;
 
           return (
             <div
-              key={track.track_id}
+              key={trackId}
               onClick={() => onSelectTrack(track)}
               className={`group cursor-pointer rounded-xl border p-4 transition-all duration-200 relative flex flex-col justify-between ${
                 isSelected
@@ -86,9 +98,9 @@ export const StepBVehicleSelector: React.FC<StepBVehicleSelectorProps> = ({
                 {imageUrl && !hasImageError ? (
                   <img
                     src={imageUrl}
-                    alt={`Vehicle Track ${track.track_id}`}
+                    alt={`Vehicle Track ${trackId}`}
                     onError={() =>
-                      setImageErrorMap((prev) => ({ ...prev, [track.track_id]: true }))
+                      setImageErrorMap((prev) => ({ ...prev, [trackId]: true }))
                     }
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   />
@@ -99,13 +111,13 @@ export const StepBVehicleSelector: React.FC<StepBVehicleSelectorProps> = ({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
                     </svg>
                     <span className="font-mono text-[10px] text-slate-500 uppercase tracking-wider">
-                      TRACK #{track.track_id} CROP
+                      TRACK #{trackId} CROP
                     </span>
                   </div>
                 )}
                 {/* Surveillance time overlay */}
                 <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-slate-900/80 backdrop-blur-sm border border-slate-700/60 font-mono text-[10px] text-slate-300">
-                  {track.first_sec.toFixed(1)}s - {track.last_sec.toFixed(1)}s
+                  {firstSec.toFixed(1)}s - {lastSec.toFixed(1)}s
                 </div>
               </div>
 
@@ -113,21 +125,21 @@ export const StepBVehicleSelector: React.FC<StepBVehicleSelectorProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="font-mono text-xs font-bold text-white tracking-wider">
-                    TRACK #{track.track_id}
+                    TRACK #{trackId}
                   </span>
                   <span className="font-mono text-[11px] px-2 py-0.5 rounded uppercase font-semibold bg-slate-800 text-cyan-400 border border-slate-700">
-                    {track.coarse_class}
+                    {coarseClass}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-400 border-t border-slate-800/80 pt-2 mb-3">
                   <div>
                     <span className="text-slate-500 block text-[10px]">TIME WINDOW</span>
-                    <span>{(track.last_sec - track.first_sec).toFixed(2)}s span</span>
+                    <span>{timeSpan}s span</span>
                   </div>
                   <div>
                     <span className="text-slate-500 block text-[10px]">FRAMES SEEN</span>
-                    <span>{track.frames_seen} frames</span>
+                    <span>{framesSeen} frames</span>
                   </div>
                 </div>
               </div>

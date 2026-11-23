@@ -28,9 +28,15 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
     return null;
   }
 
-  const consensus = evidence.consensus_plate;
-  const confidences = evidence.char_confidences || [];
-  const colourHex = COLOUR_HEX_MAP[evidence.colour.toLowerCase()] || '#64748b';
+  const consensus = evidence?.consensus_plate || '';
+  const confidences = Array.isArray(evidence?.char_confidences) ? evidence.char_confidences : [];
+  const colourRaw = evidence?.colour || 'grey';
+  const colourHex = COLOUR_HEX_MAP[colourRaw.toLowerCase()] || '#64748b';
+  const trackId = evidence?.track_id ?? 0;
+  const frames = Array.isArray(evidence?.frames_used) ? evidence.frames_used : [];
+  const colourConfPct = ((evidence?.colour_conf ?? 0) * 100).toFixed(1);
+  const bodyTypeStr = String(evidence?.body_type || 'vehicle');
+  const bodyConfPct = ((evidence?.body_type_conf ?? 0) * 100).toFixed(1);
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-6 shadow-xl relative overflow-hidden">
@@ -52,10 +58,10 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
 
         <div className="flex items-center gap-2 font-mono text-xs">
           <span className="px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">
-            Target Track: <strong className="text-cyan-400">#{evidence.track_id}</strong>
+            Target Track: <strong className="text-cyan-400">#{trackId}</strong>
           </span>
           <span className="px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">
-            Keyframes: <strong className="text-cyan-400">{evidence.frames_used.length}</strong>
+            Keyframes: <strong className="text-cyan-400">{frames.length}</strong>
           </span>
         </div>
       </div>
@@ -146,7 +152,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
               className="w-10 h-10 rounded-lg border-2 border-slate-700 shadow-inner flex items-center justify-center relative"
               style={{ backgroundColor: colourHex }}
             >
-              {evidence.colour.toLowerCase() === 'white' && (
+              {colourRaw.toLowerCase() === 'white' && (
                 <div className="w-2 h-2 rounded-full bg-slate-400" />
               )}
             </div>
@@ -155,13 +161,13 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                 DETECTED COLOUR
               </span>
               <span className="font-mono text-sm font-bold text-slate-200 capitalize">
-                {evidence.colour}
+                {colourRaw}
               </span>
             </div>
           </div>
           <div className="text-right">
             <span className="font-mono text-xs font-bold text-emerald-400">
-              {(evidence.colour_conf * 100).toFixed(1)}%
+              {colourConfPct}%
             </span>
             <span className="text-[10px] font-mono text-slate-500 block">CONFIDENCE</span>
           </div>
@@ -171,20 +177,20 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
         <div className="bg-slate-850/60 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
           <div className="flex items-center gap-3.5">
             <div className="w-10 h-10 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center font-mono font-bold text-cyan-400 text-xs">
-              {evidence.body_type.slice(0, 3).toUpperCase()}
+              {bodyTypeStr.slice(0, 3).toUpperCase()}
             </div>
             <div>
               <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 block">
                 BODY CLASSIFICATION
               </span>
               <span className="font-mono text-sm font-bold text-slate-200 capitalize">
-                {evidence.body_type}
+                {bodyTypeStr}
               </span>
             </div>
           </div>
           <div className="text-right">
             <span className="font-mono text-xs font-bold text-emerald-400">
-              {(evidence.body_type_conf * 100).toFixed(1)}%
+              {bodyConfPct}%
             </span>
             <span className="text-[10px] font-mono text-slate-500 block">CONFIDENCE</span>
           </div>
@@ -196,7 +202,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
         <div className="flex items-center justify-between mb-3">
           <span className="text-xs font-mono font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-purple-400"></span>
-            Frame-by-Frame Evidence Strip ({evidence.frames_used.length} Keyframes)
+            Frame-by-Frame Evidence Strip ({frames.length} Keyframes)
           </span>
           <span className="text-[11px] font-mono text-slate-500">
             Scroll horizontally to inspect crops →
@@ -204,24 +210,30 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
         </div>
 
         <div className="flex gap-4 overflow-x-auto pb-3 pt-1">
-          {evidence.frames_used.map((frame) => {
+          {frames.map((frame, idx) => {
+            if (!frame) return null;
+            const frameIdx = frame.frame_idx ?? idx;
             const vehUrl = resolveImageUrl(frame.image_path);
             const plateUrl = resolveImageUrl(frame.plate_crop_path);
-            const vehErrKey = `veh-${frame.frame_idx}`;
-            const plateErrKey = `plate-${frame.frame_idx}`;
+            const vehErrKey = `veh-${frameIdx}`;
+            const plateErrKey = `plate-${frameIdx}`;
+            const tsDisp = frame.timestamp_sec !== null && frame.timestamp_sec !== undefined
+              ? `${frame.timestamp_sec.toFixed(2)}s`
+              : 'N/A';
+            const frameConfPct = ((frame.confidence ?? 0) * 100).toFixed(1);
 
             return (
               <div
-                key={frame.frame_idx}
+                key={frameIdx}
                 className="flex-shrink-0 w-72 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 flex flex-col justify-between"
               >
                 {/* Frame Header */}
                 <div className="flex items-center justify-between mb-2.5 font-mono text-[11px]">
                   <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-bold border border-slate-700">
-                    FRAME #{frame.frame_idx}
+                    FRAME #{frameIdx}
                   </span>
                   <span className="text-slate-400">
-                    t = {frame.timestamp_sec !== null && frame.timestamp_sec !== undefined ? `${frame.timestamp_sec.toFixed(2)}s` : 'N/A'}
+                    t = {tsDisp}
                   </span>
                 </div>
 
@@ -230,7 +242,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                   {vehUrl && !imageErrorMap[vehErrKey] ? (
                     <img
                       src={vehUrl}
-                      alt={`Vehicle crop ${frame.frame_idx}`}
+                      alt={`Vehicle crop ${frameIdx}`}
                       onError={() =>
                         setImageErrorMap((prev) => ({ ...prev, [vehErrKey]: true }))
                       }
@@ -238,7 +250,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                     />
                   ) : (
                     <div className="font-mono text-[10px] text-slate-500">
-                      VEHICLE CROP #{frame.frame_idx}
+                      VEHICLE CROP #{frameIdx}
                     </div>
                   )}
                   <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-slate-950/80 backdrop-blur-sm text-[9px] font-mono text-slate-400 border border-slate-800">
@@ -251,7 +263,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                   {plateUrl && !imageErrorMap[plateErrKey] ? (
                     <img
                       src={plateUrl}
-                      alt={`Plate crop ${frame.frame_idx}`}
+                      alt={`Plate crop ${frameIdx}`}
                       onError={() =>
                         setImageErrorMap((prev) => ({ ...prev, [plateErrKey]: true }))
                       }
@@ -259,7 +271,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                     />
                   ) : (
                     <div className="font-mono text-[10px] text-slate-500">
-                      PLATE CROP #{frame.frame_idx}
+                      PLATE CROP #{frameIdx}
                     </div>
                   )}
                   <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-slate-950/80 backdrop-blur-sm text-[9px] font-mono text-slate-400 border border-slate-800">
@@ -278,7 +290,7 @@ export const StepCEvidenceBreakdown: React.FC<StepCEvidenceBreakdownProps> = ({ 
                   <div className="text-right">
                     <span className="text-[10px] text-slate-500 block">CONFIDENCE</span>
                     <span className="font-bold text-emerald-400">
-                      {(frame.confidence * 100).toFixed(1)}%
+                      {frameConfPct}%
                     </span>
                   </div>
                 </div>

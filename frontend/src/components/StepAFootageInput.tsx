@@ -14,17 +14,18 @@ interface StepAFootageInputProps {
 }
 
 export const StepAFootageInput: React.FC<StepAFootageInputProps> = ({
-  scenarios,
+  scenarios = [],
   selectedScenarioId,
   onSelectScenario,
   uploadedFile,
   onFileUpload,
-  knownHint,
+  knownHint = '',
   onKnownHintChange,
   onScanVideo,
   isScanning,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scenarioList = Array.isArray(scenarios) ? scenarios : [];
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -62,7 +63,7 @@ export const StepAFootageInput: React.FC<StepAFootageInputProps> = ({
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column (6 cols): 4 Pre-loaded Demo Scenarios */}
+        {/* Left Column (7 cols): 4 Pre-loaded Demo Scenarios */}
         <div className="lg:col-span-7 flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -71,22 +72,27 @@ export const StepAFootageInput: React.FC<StepAFootageInputProps> = ({
                 Pre-Loaded Test Scenarios (AIML-01 Presets)
               </label>
               <span className="text-[11px] text-slate-400 font-mono">
-                {scenarios.length} calibrated suites
+                {scenarioList.length} calibrated suites
               </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {scenarios.map((scenario, idx) => {
+              {scenarioList.map((scenario, idx) => {
+                if (!scenario) return null;
                 const isSelected = selectedScenarioId === scenario.id;
-                // Identify target condition
                 const isBlur = scenario.id === 'scenario-1';
                 const isConfusion = scenario.id === 'scenario-2';
                 const isPartial = scenario.id === 'scenario-3';
                 const isOutOfReg = scenario.id === 'scenario-4';
 
+                const titleText = (scenario.title || `Scenario ${idx + 1}`).replace(/Scenario \d+: /, '');
+                const plateText = scenario.evidence?.consensus_plate || 'UNKNOWN';
+                const colourText = scenario.evidence?.colour || '';
+                const bodyText = scenario.evidence?.body_type || '';
+
                 return (
                   <button
-                    key={scenario.id}
+                    key={scenario.id || idx}
                     type="button"
                     onClick={() => onSelectScenario(scenario)}
                     className={`text-left p-3.5 rounded-lg border transition duration-150 flex flex-col justify-between ${
@@ -115,20 +121,22 @@ export const StepAFootageInput: React.FC<StepAFootageInputProps> = ({
                         </span>
                       </div>
                       <div className="font-semibold text-xs text-slate-200 line-clamp-1 mb-1">
-                        {scenario.title.replace(/Scenario \d+: /, '')}
+                        {titleText}
                       </div>
                       <div className="flex items-center gap-2 mb-2 font-mono text-[11px]">
                         <span className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 font-bold border border-slate-700">
-                          {scenario.evidence.consensus_plate}
+                          {plateText}
                         </span>
-                        <span className="text-slate-400 capitalize">
-                          {scenario.evidence.colour} {scenario.evidence.body_type}
-                        </span>
+                        {(colourText || bodyText) && (
+                          <span className="text-slate-400 capitalize">
+                            {colourText} {bodyText}
+                          </span>
+                        )}
                       </div>
                     </div>
 
                     <div className="text-[11px] text-slate-400 line-clamp-2 mt-1 italic border-t border-slate-800/80 pt-2">
-                      {scenario.expected_outcome}
+                      {scenario.expected_outcome || 'Benchmark validation test.'}
                     </div>
                   </button>
                 );
