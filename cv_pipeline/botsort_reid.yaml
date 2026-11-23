@@ -1,23 +1,24 @@
-# Ultralytics BoT-SORT configuration with Native Appearance Re-Identification
-# Tuned for fixed CCTV camera vehicle tracking and occlusion recovery
+# Ultralytics BoT-SORT configuration for fixed CCTV camera vehicle tracking
+# Tuned for fast-moving two-wheelers, intersection turns, and occlusion handling
 
 tracker_type: botsort
 
 # Detection matching thresholds
-track_high_thresh: 0.40
-track_low_thresh: 0.15
-new_track_thresh: 0.40
+track_high_thresh: 0.45  # Confident first-stage detection threshold
+track_low_thresh: 0.15   # Recovers low-confidence blurred/turning vehicle detections
+new_track_thresh: 0.50   # Requires score >= 0.50 to initiate a new track
 
-# Memory & association settings
-track_buffer: 90 # Keep lost tracks alive for 90 frames (~3 seconds) across occlusions
-match_thresh: 0.7
-fuse_score: True
+# Memory and association settings
+track_buffer: 90         # Keep lost tracks alive for 90 frames (~3s at 30fps) across occlusions
+match_thresh: 0.72       # Tightened matching threshold (0.72) to prevent jumping onto adjacent lane vehicles
+fuse_score: True         # Weight association by detection confidence
 
-# Fixed CCTV camera: camera motion compensation disabled
-gmc_method: none
+# Fixed CCTV camera setting
+gmc_method: none         # Camera-motion compensation disabled for fixed CCTV
 
-# Appearance ReID settings (using detector native features)
-with_reid: True
+# Appearance Re-ID settings
+# Rely on motion Kalman filter + IoU association so 90-degree turns do not split IDs
+with_reid: False
 model: auto
 proximity_thresh: 0.5
-appearance_thresh: 0.65
+appearance_thresh: 0.80
