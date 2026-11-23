@@ -346,3 +346,24 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - Test suite: **49/49 tests passing ($100\%$)** in 5.7s.
   - Benchmarked on `outputs/activa_signal/track_027` (Reconciled: `UP15BE5580` / Ghost 1: `UP15BE5580` at $0.779$) and `outputs/simple_traffic_30s/track_002` (Reconciled: `????B?718?` / Ghost 1: `HR01BC7184` at $0.645$).
 
+---
+
+### 2026-11-24 04:50:00 IST — Top-Level `final_plate` Key, Ghost Stack Pruning Floor (`0.05`), & Interactive Full-Stack Tester (`scripts/test_full_pipeline.py`)
+- **1. Standardize Top-Level Plate Key (`cv_pipeline/vlm_verifier.py`)**:
+  - Explicitly added `"final_plate"` alongside `"reconciled_plate"` across both `SUCCESS` and `FALLBACK_TO_OCR` returns.
+  - Preserved `"reconciled_plate"` for backward compatibility across all existing callers and tests.
+- **2. Lower `ghost_stack` Pruning Floor to `0.05`**:
+  - Reduced soft-score cutoff from `0.12` to `0.05` so single-pipeline OCR candidates (weighted by $0.25-0.30$, e.g. $\sim 0.06-0.09$) survive in `ghost_stack`.
+  - On `simple_traffic_30s` Track 2, confirmed slot 0 retains `'K'` ($0.069$) alongside `'M'` ($0.474$), and slot 9 retains `'2'` ($0.091$) alongside `'4'` ($0.406$).
+  - Updated `tests/test_vlm_verifier.py` to assert `"final_plate"` is non-null and that low-score single-pipeline OCR candidates survive.
+- **3. Interactive Full-Stack Tester (`scripts/test_full_pipeline.py`)**:
+  - Built an interactive CLI tool testing Stage 1 (BoT-SORT vehicle tracking) and full Stage 2 (2.1 vehicle crop extraction $\to$ 2.2 dual-detector plate localization & readability scoring $\to$ 2.3 RapidOCR + PARSeq dual-pipeline OCR $\to$ 2.4 blind multi-tier VLM triple-check).
+  - Isolates all runs into `test_outputs/<clip_stem>/` without touching `outputs/` (added `test_outputs/` to `.gitignore`).
+  - Added robust fallback path resolution in `cv_pipeline/ocr_engine.py` and `cv_pipeline/vlm_verifier.py` to seamlessly handle arbitrary output directory nesting.
+  - Includes interactive video selector scanning `data/Final` (10 videos), Stage 1 tracking caching/reuse, compact track selection table, option `[v]` to launch annotated video, full Stage 2 execution, terminal forensic report with Top-3 ghost predictions, and automatic OS image viewer launch of the clearest unenhanced plate crop.
+- **4. Verification & PyTorch Device Fix**:
+  - Fixed `torch.cuda.get_device_name` in `cv_pipeline/pipeline.py` to handle string `"0"` via integer index conversion.
+  - End-to-end verification run on `activa_signal.mp4` Track 27 inside `test_outputs/activa_signal/track_027` succeeded with full forensic table and clearest crop image generated.
+  - Full test suite: **77/77 tests passing ($100\%$)**.
+
+

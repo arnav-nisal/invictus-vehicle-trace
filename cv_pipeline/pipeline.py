@@ -112,7 +112,8 @@ class VehicleTrackingPipeline:
 
         # Check and log device status
         if torch.cuda.is_available() and (str(self.device) in ("0", "cuda") or isinstance(self.device, int)):
-            self.device_name = torch.cuda.get_device_name(self.device)
+            dev_idx = int(self.device) if str(self.device).isdigit() else self.device
+            self.device_name = torch.cuda.get_device_name(dev_idx)
             logger.info(f"NVIDIA GPU Acceleration enabled: {self.device_name} (device={self.device})")
         else:
             self.device_name = "CPU"

@@ -143,8 +143,17 @@ def build_evidence_grids(
 
             if not unenh_p.is_file() and not unenh_p.is_absolute():
                 unenh_p = proj_root / unenh_p
+            if not unenh_p.is_file():
+                fallback_u = t_dir / "plate_crops_selected" / "unenhanced" / unenh_p.name
+                if fallback_u.is_file():
+                    unenh_p = fallback_u
+
             if not enh_p.is_file() and not enh_p.is_absolute():
                 enh_p = proj_root / enh_p
+            if not enh_p.is_file():
+                fallback_e = t_dir / "plate_crops_selected" / "enhanced" / enh_p.name
+                if fallback_e.is_file():
+                    enh_p = fallback_e
 
             img_unenh = cv2.imread(str(unenh_p)) if unenh_p.is_file() else None
             img_enh = cv2.imread(str(enh_p)) if enh_p.is_file() else None
@@ -644,7 +653,9 @@ def reconcile_vlm_with_ocr(
             "fallback_trace": fallback_trace or [],
             "stage_2_3_plate": recovered_ocr,
             "vlm_raw_plate": None,
+            "final_plate": recovered_ocr,
             "reconciled_plate": recovered_ocr,
+            "overall_confidence": float(ocr_result.get("overall_confidence", 0.0)),
             "state_code_valid": validate_state_code(recovered_ocr),
             "plate_layout": "unknown",
             "reconciled_slots": reconciled_slots,
@@ -826,12 +837,12 @@ def reconcile_vlm_with_ocr(
             final_char_soft_score = 0.0
 
         # Build ghost_stack:
-        # - Drop candidates with soft_score < 0.12
+        # - Drop candidates with soft_score < 0.05
         # - Exclude final_char if tone is green or black
         # - Tag kind: "ghost_fill" if tone == "unknown" else "conflict_alt"
         ghost_entries = []
         for cand in scored_cands:
-            if cand["soft_score"] < 0.12:
+            if cand["soft_score"] < 0.05:
                 continue
             if ui_tile_tone in ("green", "black") and cand["char"] == final_char:
                 continue
@@ -888,6 +899,7 @@ def reconcile_vlm_with_ocr(
         "fallback_trace": fallback_trace or [],
         "stage_2_3_plate": recovered_ocr,
         "vlm_raw_plate": vlm_raw_text or None,
+        "final_plate": reconciled_plate,
         "reconciled_plate": reconciled_plate,
         "overall_confidence": adjusted_conf,
         "confidence_penalty_total": round(disputed_count * -0.05, 2),

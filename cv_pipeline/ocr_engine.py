@@ -748,8 +748,19 @@ class PlateOCREngine:
         proj_root = manifest_path.parent.parent.parent.parent  # track→clip→outputs→proj
 
         for plate in selected:
-            unenh = str(proj_root / plate["selected_unenhanced_path"])
-            enh   = str(proj_root / plate["selected_enhanced_path"])
+            p_unenh = Path(plate["selected_unenhanced_path"])
+            unenh = str(proj_root / p_unenh) if not p_unenh.is_absolute() else str(p_unenh)
+            if not Path(unenh).exists():
+                fb_u = manifest_path.parent / "plate_crops_selected" / "unenhanced" / p_unenh.name
+                if fb_u.exists():
+                    unenh = str(fb_u)
+
+            p_enh = Path(plate["selected_enhanced_path"])
+            enh = str(proj_root / p_enh) if not p_enh.is_absolute() else str(p_enh)
+            if not Path(enh).exists():
+                fb_e = manifest_path.parent / "plate_crops_selected" / "enhanced" / p_enh.name
+                if fb_e.exists():
+                    enh = str(fb_e)
 
             res = self._run_frame(
                 unenh, enh,
@@ -897,8 +908,16 @@ class PlateOCREngine:
                 p_match = next((p for p in selected if p["frame_idx"] == fi), None)
                 unenh_rel = p_match["selected_unenhanced_path"] if p_match else ""
                 enh_rel = p_match["selected_enhanced_path"] if p_match else ""
-                unenh_full = str(proj_root / unenh_rel) if unenh_rel else ""
-                enh_full = str(proj_root / enh_rel) if enh_rel else ""
+                unenh_full = str(proj_root / unenh_rel) if unenh_rel and not Path(unenh_rel).is_absolute() else unenh_rel
+                enh_full = str(proj_root / enh_rel) if enh_rel and not Path(enh_rel).is_absolute() else enh_rel
+                if unenh_full and not Path(unenh_full).exists():
+                    fb_u = manifest_path.parent / "plate_crops_selected" / "unenhanced" / Path(unenh_rel).name
+                    if fb_u.exists():
+                        unenh_full = str(fb_u)
+                if enh_full and not Path(enh_full).exists():
+                    fb_e = manifest_path.parent / "plate_crops_selected" / "enhanced" / Path(enh_rel).name
+                    if fb_e.exists():
+                        enh_full = str(fb_e)
                 frame_best_weights[fi] = {
                     "frame_idx": fi,
                     "weight": round(w, 4),
@@ -973,4 +992,11 @@ def _empty_result(track_id, manifest_path: Path) -> Dict:
 def run_ocr_track(plate_manifest_path: str, device: str = "cuda") -> Dict:
     """Public convenience wrapper."""
     engine = PlateOCREngine(device=device)
-    return engine.run_ocr_track(plate_manifest_path)
+    result = engine.run_ocr_track(plate_manifest_path)
+    try:
+        out_json = Path(plate_manifest_path).resolve().parent / "ocr_result.json"
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not auto-write ocr_result.json: {e}")
+    return result
