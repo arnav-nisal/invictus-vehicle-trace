@@ -39,6 +39,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = BASE_DIR / "outputs"
 TRACKS_DIR = OUTPUTS_DIR / "tracks"
 SUMMARY_FILE = OUTPUTS_DIR / "tracks_summary.json"
+EXTRACTOR_PROVIDER = os.getenv("EXTRACTOR_PROVIDER", "opensource").lower()
 DATA_CLIPS_DIR = BASE_DIR / "data" / "clips"
 
 # Attempt to import RapidOCR if installed
@@ -259,7 +260,36 @@ def get_vehicle_evidence_for_track(
     # Check if this track matches one of our 4 instant demo presets
     preset_key = f"scenario-{track_id}"
     if preset_key in DEMO_SCENARIOS:
-        return DEMO_SCENARIOS[preset_key].evidence
+        base_evidence = DEMO_SCENARIOS[preset_key].evidence.model_copy(deep=True)
+        crop_img = None
+        for frame in base_evidence.frames_used:
+            p = BASE_DIR / frame.image_path
+            if p.exists():
+                crop_img = cv2.imread(str(p))
+                break
+
+        from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+        attrs_meta = extract_vehicle_attributes_with_meta(
+            images=[crop_img] if crop_img is not None else [],
+            coarse_class=base_evidence.body_type.value,
+            track_id=track_id,
+        )
+        attrs = attrs_meta.to_base_attributes()
+        vlm_warning = attrs_meta.warning
+
+        base_evidence.colour = attrs.colour
+        base_evidence.colour_conf = attrs.colour_conf
+        try:
+            base_evidence.body_type = BodyType(attrs.body_type)
+        except Exception:
+            pass
+        base_evidence.body_type_conf = attrs.body_type_conf
+        base_evidence.make = attrs.make
+        base_evidence.make_conf = attrs.make_conf
+        base_evidence.model = attrs.model
+        base_evidence.model_conf = attrs.model_conf
+        base_evidence.warning = vlm_warning
+        return base_evidence
 
     # Load tracks_summary.json if not passed
     tracks_meta_entry = None
@@ -279,9 +309,39 @@ def get_vehicle_evidence_for_track(
         except Exception as e:
             logger.warning(f"Could not read {SUMMARY_FILE}: {e}")
 
-    # Fallback to scenario-1 if completely unknown
+    # Fallback to demo scenario if track not in detected summary
     if not tracks_meta_entry:
-        return DEMO_SCENARIOS["scenario-1"].evidence
+        scenario_key = f"scenario-{track_id}" if f"scenario-{track_id}" in DEMO_SCENARIOS else "scenario-1"
+        base_evidence = DEMO_SCENARIOS[scenario_key].evidence.model_copy(deep=True)
+        crop_img = None
+        for frame in base_evidence.frames_used:
+            p = BASE_DIR / frame.image_path
+            if p.exists():
+                crop_img = cv2.imread(str(p))
+                break
+
+        from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+        attrs_meta = extract_vehicle_attributes_with_meta(
+            images=[crop_img] if crop_img is not None else [],
+            coarse_class=base_evidence.body_type.value,
+            track_id=track_id,
+        )
+        attrs = attrs_meta.to_base_attributes()
+        vlm_warning = attrs_meta.warning
+
+        base_evidence.colour = attrs.colour
+        base_evidence.colour_conf = attrs.colour_conf
+        try:
+            base_evidence.body_type = BodyType(attrs.body_type)
+        except Exception:
+            pass
+        base_evidence.body_type_conf = attrs.body_type_conf
+        base_evidence.make = attrs.make
+        base_evidence.make_conf = attrs.make_conf
+        base_evidence.model = attrs.model
+        base_evidence.model_conf = attrs.model_conf
+        base_evidence.warning = vlm_warning
+        return base_evidence
 
     # Extract crop path and load image if available
     saved_path_str = tracks_meta_entry.get("saved_image_path")
@@ -291,12 +351,20 @@ def get_vehicle_evidence_for_track(
         if full_crop_path.exists():
             crop_img = cv2.imread(str(full_crop_path))
 
-    # Determine colour
-    dominant_colour, colour_conf = extract_dominant_colour(crop_img)
+    # Determine colour and body type via attribute extractor (Gemini multimodal or Open-Source LLM cascade)
+    from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+    attrs_meta = extract_vehicle_attributes_with_meta(
+        images=[crop_img] if crop_img is not None else [],
+        coarse_class=class_name,
+        track_id=track_id,
+    )
+    attrs = attrs_meta.to_base_attributes()
+    vlm_warning = attrs_meta.warning
 
-    # Determine body type
-    class_name = tracks_meta_entry.get("class_name") or tracks_meta_entry.get("category", "car")
-    body_type, body_conf = map_class_to_body_type(class_name)
+    try:
+        body_type_enum = BodyType(attrs.body_type)
+    except Exception:
+        body_type_enum = BodyType.CAR
 
     # Run OCR with ? wildcards
     best_frame = tracks_meta_entry.get("best_frame", 42) or 42
@@ -313,11 +381,16 @@ def get_vehicle_evidence_for_track(
         track_id=track_id,
         consensus_plate=plate_text,
         char_confidences=char_confs,
-        colour=dominant_colour,
-        colour_conf=colour_conf,
-        body_type=body_type,
-        body_type_conf=body_conf,
+        colour=attrs.colour,
+        colour_conf=attrs.colour_conf,
+        body_type=body_type_enum,
+        body_type_conf=attrs.body_type_conf,
+        make=attrs.make,
+        make_conf=attrs.make_conf,
+        model=attrs.model,
+        model_conf=attrs.model_conf,
         frames_used=frames_used,
+        warning=vlm_warning,
     )
 
 

@@ -37,6 +37,7 @@ runs/
 # Environment & Config Secrets
 .env
 .env.*
+!.env.example
 
 # IDE & OS Metadata
 .vscode/

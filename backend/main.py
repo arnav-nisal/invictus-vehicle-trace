@@ -7,6 +7,7 @@ database health checks, and pre-configured realistic demo scenarios.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,7 +18,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from backend.database import ensure_db_exists, get_all_registry_vehicles, get_total_vehicles_count
+from backend.database import (
+    ensure_db_exists,
+    get_all_registry_vehicles,
+    get_sightings_by_plate,
+    get_total_vehicles_count,
+    record_sighting,
+)
 from backend.demo_data import DEMO_SCENARIOS, MOCK_VIDEO_SCAN_RESPONSE
 from backend.cv_bridge import (
     get_vehicle_evidence_for_track,
@@ -29,6 +36,7 @@ from backend.schemas import (
     AnalysisResponse,
     AnalyzeRequest,
     DemoScenario,
+    SightingRecord,
     VehicleEvidence,
     VideoScanResponse,
 )
@@ -43,6 +51,7 @@ logger = logging.getLogger("vehicle_trace.main")
 # Project directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = BASE_DIR / "outputs"
+EXTRACTOR_PROVIDER = os.getenv("EXTRACTOR_PROVIDER", "opensource").lower()
 
 
 def ensure_output_directories():
@@ -244,7 +253,7 @@ async def analyze_vehicle(
     evidence: Optional[VehicleEvidence] = payload.evidence
     known_hint: Optional[str] = payload.known_partial_plate
 
-    # If scenario_id provided, look up evidence from pre-configured scenarios (instant presets)
+    # If scenario_id provided, look up evidence and run through active extractor provider
     if not evidence and payload.scenario_id:
         scenario = DEMO_SCENARIOS.get(payload.scenario_id)
         if not scenario:
@@ -252,10 +261,12 @@ async def analyze_vehicle(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Scenario '{payload.scenario_id}' not found. Available: {list(DEMO_SCENARIOS.keys())}",
             )
-        evidence = scenario.evidence
-        # If user didn't provide a known_partial_plate hint, check scenario default
-        if not known_hint and scenario.suggested_known_partial_plate:
-            pass
+        target_track_id = scenario.evidence.track_id
+        try:
+            evidence = get_vehicle_evidence_for_track(target_track_id)
+        except Exception as e:
+            logger.warning(f"CV bridge extraction for scenario {payload.scenario_id} (track {target_track_id}) failed: {e}")
+            evidence = scenario.evidence.model_copy(deep=True)
 
     # If track_id provided without direct evidence, extract via CV bridge
     if not evidence and payload.track_id is not None:
@@ -281,14 +292,59 @@ async def analyze_vehicle(
         )
 
     # Execute custom multi-signal probabilistic matching engine
+    rto_priors = payload.rto_priors or getattr(evidence, "rto_priors", None)
+    if rto_priors and getattr(evidence, "rto_priors", None) is None:
+        evidence.rto_priors = rto_priors
+
     result = match_and_rank_vehicles(
         evidence=evidence,
         registry_vehicles=registry_vehicles,
         known_partial_plate=known_hint,
+        rto_priors=rto_priors,
         top_k=5,
     )
 
+    # Propagate any VLM outage/fallback warnings to the API response
+    if evidence.warning:
+        result.warning = evidence.warning
+
+    # Automatically log sighting if a confident match was produced
+    if not result.no_confident_match and result.top_matches:
+        top_cand = result.top_matches[0]
+        crop_path = None
+        if evidence.frames_used and len(evidence.frames_used) > 0:
+            crop_path = evidence.frames_used[0].image_path or evidence.frames_used[0].plate_crop_path
+        camera_id = payload.camera_id or "CAM_01"
+        try:
+            record_sighting(
+                track_id=evidence.track_id,
+                camera_id=camera_id,
+                top_matched_plate=top_cand.plate_number,
+                confidence=top_cand.composite_score,
+                crop_path=crop_path,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to auto-record sighting for plate {top_cand.plate_number}: {e}")
+
     return result
+
+
+@app.get(
+    "/api/sightings/{plate_number}",
+    response_model=List[SightingRecord],
+    summary="Get Multi-Camera Sighting History for Plate",
+    tags=["Sightings"],
+)
+async def get_plate_sightings(plate_number: str) -> List[SightingRecord]:
+    """Retrieve all historical multi-camera sightings for a license plate ordered by timestamp ASC."""
+    try:
+        return get_sightings_by_plate(plate_number)
+    except Exception as e:
+        logger.error(f"Error querying sightings for plate '{plate_number}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query sightings for plate: {plate_number}",
+        )
 
 
 @app.post(

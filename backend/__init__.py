@@ -12,6 +12,7 @@ from .schemas import (
     AnalysisResponse,
     AnalyzeRequest,
     DemoScenario,
+    SightingRecord,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "AnalysisResponse",
     "AnalyzeRequest",
     "DemoScenario",
+    "SightingRecord",
 ]

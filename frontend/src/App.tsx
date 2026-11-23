@@ -124,6 +124,7 @@ export const App: React.FC = () => {
       const analysis = await analyzeVehicle({
         scenario_id: scenario.id,
         known_partial_plate: hint || undefined,
+        rto_priors: scenario.evidence?.rto_priors ?? undefined,
       }).catch((apiErr) => {
         console.warn('Live analyze API error, using scenario evidence:', apiErr);
         // Fallback to local scenario simulation if backend is offline
@@ -312,6 +313,21 @@ export const App: React.FC = () => {
             >
               Dismiss
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* VLM Outage / Cascading Fallback Alert Banner */}
+      {analysisResult?.warning && (
+        <div className="max-w-[1440px] mx-auto w-full px-4 sm:px-6 lg:px-8 mt-4">
+          <div className="bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3 flex items-start sm:items-center justify-between text-xs text-amber-950 shadow-sm gap-3">
+            <div className="flex items-start sm:items-center gap-2.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping flex-shrink-0 mt-0.5 sm:mt-0" />
+              <div className="font-sans leading-relaxed">
+                <span className="font-bold uppercase tracking-wider text-amber-900 mr-2">VLM Outage / Fallback Active:</span>
+                <span className="font-medium text-amber-800">{analysisResult.warning}</span>
+              </div>
+            </div>
           </div>
         </div>
       )}

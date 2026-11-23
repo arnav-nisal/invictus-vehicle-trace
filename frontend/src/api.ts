@@ -1,6 +1,7 @@
 import {
   AnalysisResponse,
   DemoScenario,
+  SightingRecord,
   SystemHealth,
   VehicleEvidence,
   VideoScanResponse,
@@ -68,6 +69,7 @@ export async function analyzeVehicle(params: {
   scenario_id?: string;
   evidence?: VehicleEvidence;
   known_partial_plate?: string;
+  rto_priors?: Record<string, number>;
 }): Promise<AnalysisResponse> {
   const resp = await fetch(`${API_BASE}/api/vehicles/analyze`, {
     method: 'POST',
@@ -98,4 +100,14 @@ export async function exportReportHtml(analysis: AnalysisResponse): Promise<stri
     throw new Error(`Report export failed (${resp.status}): ${errorText}`);
   }
   return resp.text();
+}
+
+/** Fetch chronological sighting timeline for a matched plate from CCTV network. */
+export async function getSightings(plateNumber: string): Promise<SightingRecord[]> {
+  const encoded = encodeURIComponent(plateNumber);
+  const resp = await fetch(`${API_BASE}/api/sightings/${encoded}`);
+  if (!resp.ok) {
+    throw new Error(`Sightings fetch failed (${resp.status})`);
+  }
+  return resp.json();
 }
