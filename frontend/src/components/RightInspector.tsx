@@ -258,6 +258,21 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         </div>
       )}
 
+      {/* 2a. VLM Outage / Fallback Warning Notice */}
+      {analysis.warning && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50/90 p-3.5 space-y-1.5 shadow-sm">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0" />
+            <span className="font-sans text-xs font-bold uppercase tracking-wider text-amber-900">
+              VLM Outage • Local Fallback Active
+            </span>
+          </div>
+          <p className="text-xs text-amber-800 font-sans leading-relaxed">
+            {analysis.warning}
+          </p>
+        </div>
+      )}
+
       {/* 2b. Target Vehicle Evidence Badges */}
       <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-3 flex flex-wrap items-center gap-2 text-xs font-sans">
         <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Target Evidence:</span>

@@ -255,6 +255,11 @@ class VehicleEvidence(BaseModel):
         default_factory=list,
         description="List of best per-frame crops and OCR predictions used for consensus.",
     )
+    warning: Optional[str] = Field(
+        default=None,
+        description="Warning or outage notice from attribute extraction (e.g. VLM cascade failure).",
+        examples=["All open-source VLM tiers failed: Tier 1 (NVIDIA NIM): ..."],
+    )
 
     @field_validator("consensus_plate")
     @classmethod
@@ -446,6 +451,11 @@ class AnalysisResponse(BaseModel):
         examples=[
             "Strong match found: Rank 1 vehicle (MH12DE1432) has 98.5% confidence with exact plate match."
         ],
+    )
+    warning: Optional[str] = Field(
+        default=None,
+        description="Visible warning or error notification (e.g., VLM tier failover to local fallback).",
+        examples=["All open-source VLM tiers failed: Tier 1 (NVIDIA NIM): ..."],
     )
 
 

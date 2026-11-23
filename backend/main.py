@@ -7,6 +7,7 @@ database health checks, and pre-configured realistic demo scenarios.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +44,7 @@ logger = logging.getLogger("vehicle_trace.main")
 # Project directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = BASE_DIR / "outputs"
+EXTRACTOR_PROVIDER = os.getenv("EXTRACTOR_PROVIDER", "opensource").lower()
 
 
 def ensure_output_directories():
@@ -244,7 +246,7 @@ async def analyze_vehicle(
     evidence: Optional[VehicleEvidence] = payload.evidence
     known_hint: Optional[str] = payload.known_partial_plate
 
-    # If scenario_id provided, look up evidence from pre-configured scenarios (instant presets)
+    # If scenario_id provided, look up evidence and run through active extractor provider
     if not evidence and payload.scenario_id:
         scenario = DEMO_SCENARIOS.get(payload.scenario_id)
         if not scenario:
@@ -252,10 +254,12 @@ async def analyze_vehicle(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Scenario '{payload.scenario_id}' not found. Available: {list(DEMO_SCENARIOS.keys())}",
             )
-        evidence = scenario.evidence
-        # If user didn't provide a known_partial_plate hint, check scenario default
-        if not known_hint and scenario.suggested_known_partial_plate:
-            pass
+        target_track_id = scenario.evidence.track_id
+        try:
+            evidence = get_vehicle_evidence_for_track(target_track_id)
+        except Exception as e:
+            logger.warning(f"CV bridge extraction for scenario {payload.scenario_id} (track {target_track_id}) failed: {e}")
+            evidence = scenario.evidence.model_copy(deep=True)
 
     # If track_id provided without direct evidence, extract via CV bridge
     if not evidence and payload.track_id is not None:
@@ -287,6 +291,10 @@ async def analyze_vehicle(
         known_partial_plate=known_hint,
         top_k=5,
     )
+
+    # Propagate any VLM outage/fallback warnings to the API response
+    if evidence.warning:
+        result.warning = evidence.warning
 
     return result
 

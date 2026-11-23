@@ -43,6 +43,7 @@ export interface VehicleEvidence {
   model?: string;
   model_conf?: number;
   frames_used: FrameEvidence[];
+  warning?: string | null;
 }
 
 export interface ScoreBreakdown {
@@ -72,6 +73,7 @@ export interface AnalysisResponse {
   top_matches: MatchCandidate[];
   no_confident_match: boolean;
   explanation?: string | null;
+  warning?: string | null;
 }
 
 export interface DemoScenario {
