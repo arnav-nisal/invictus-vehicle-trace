@@ -47,3 +47,24 @@ This document records the technical challenges encountered during the developmen
   3. *Overhead Bar Color Pollution*: The dark horizontal bar crossed the vehicle's roof and windshield, distorting full-crop color histograms and Lab distance calculations.
   4. *Cross-Lane Associations*: In parallel multi-lane traffic, tracks that split under the bar sometimes merged with cars in adjacent parallel lanes because both cars shared dark colors and similar forward speeds.
 - **Impact**: Broken vehicle traces and cross-lane identity mix-ups at highway monitoring gantries.
+
+---
+
+## 7. Bumper-Edge License Plate Clipping in Standard Crops
+- **Symptom**: Standard object detection bounding boxes tightly wrap the visual contour of a vehicle. For two-wheelers (scooters/motorcycles) and compact cars, the license plate is mounted at the extreme bottom edge of the rear fender or front bumper.
+- **Root Cause**: Tight YOLO bounding boxes frequently clip or truncate the bottom 5–10 pixels of the bumper. In downstream plate detection and OCR, this edge clipping cuts off the state prefix or registration digits (e.g. cutting off the bottom of `MH` or numeric digits).
+- **Impact**: Unreadable plates or OCR hallucination due to truncated characters at crop boundaries.
+
+---
+
+## 8. Random-Seek Latency in Video Crop Extraction
+- **Symptom**: When extracting 100+ frame crops for a single tracked vehicle using standard `cv2.VideoCapture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)`, OpenCV takes up to 45–60 seconds on Windows.
+- **Root Cause**: MP4 video compression relies on GOPs (Group of Pictures) with inter-frame P/B compression and sparse I-frames (keyframes). Calling `cap.set()` forces the video decoder to repeatedly seek backward to the preceding keyframe and sequentially decode all intermediate frames up to the requested index.
+- **Impact**: Severe interactive lag when an investigator selects a vehicle ID and waits for cropped images to be generated.
+
+---
+
+## 9. Monolithic Pipeline Coupling vs. Forensic Re-Analysis
+- **Symptom**: Initially, selecting a different vehicle or extracting its full-track frame history required re-running the entire YOLO object detection and BoT-SORT tracking pipeline over the video.
+- **Root Cause**: Frame-by-frame vehicle trajectories and bounding boxes were stored only in memory during the tracking pass and discarded after exporting the single-frame best crops and contact sheet.
+- **Impact**: Inability to quickly inspect multiple vehicles or iteratively test downstream license plate detection without enduring redundant GPU computation.

@@ -32,7 +32,6 @@ from .config import (
     DEFAULT_MAX_CONSECUTIVE_AREA_JUMP,
 )
 from .crop_selector import BestCropSelector
-from .grid_generator import ContactSheetGenerator
 from .stitcher import TrackletStitcher
 from .splitter import split_tracks_on_sudden_jumps
 
@@ -381,17 +380,53 @@ class VehicleTrackingPipeline:
             }
             qualified_tracks.append(track_entry)
 
-        # Generate contact sheet grid image
-        grid_output_path = self.output_dir / "tracks_grid.jpg"
-        clip_title = video_path.stem.replace("_", " ").upper()
-        logger.info(f"Generating contact-sheet grid image at '{grid_output_path}'...")
-        grid_gen = ContactSheetGenerator(tile_width=250, tile_height=270, cols=5)
-        grid_gen.create_grid(
-            tracks=qualified_tracks,
-            output_path=str(grid_output_path),
-            title=f"INVICTUS VEHICLE TRACE — {clip_title}",
-            subtitle=f"YOLO26s ({self.imgsz}px) + BoT-SORT (CCTV tuned + Stitcher) on {self.device_name}",
-        )
+        # Save frame-by-frame track history for all kept vehicles
+        track_history_data: Dict[str, Any] = {
+            "video_source": str(video_path),
+            "video_resolution": f"{width}x{height}",
+            "video_fps": round(fps, 2),
+            "total_frames": total_frames,
+            "duration_seconds": round(duration, 3),
+            "total_tracked_vehicles": len(kept_track_ids),
+            "tracks": {},
+        }
+
+        for tid in sorted(kept_track_ids):
+            meta = tracks_meta[tid]
+            track_history_data["tracks"][str(tid)] = {
+                "id": int(tid),
+                "class_name": meta["class_name"],
+                "category": meta["category"],
+                "start_frame": int(meta["start_frame"]),
+                "end_frame": int(meta["end_frame"]),
+                "start_timestamp": format_timestamp(meta["start_timestamp_sec"]),
+                "end_timestamp": format_timestamp(meta["end_timestamp_sec"]),
+                "duration_seconds": round(meta["end_timestamp_sec"] - meta["start_timestamp_sec"] + (1.0 / fps), 3),
+                "frame_count": int(meta["frame_count"]),
+                "original_ids": [int(x) for x in meta.get("original_ids", [tid])],
+                "observations": [],
+            }
+
+        for f_idx in sorted(frame_observations.keys()):
+            t_sec = f_idx / fps
+            for det in frame_observations[f_idx]:
+                tid = det["id"]
+                if tid in kept_track_ids:
+                    obs_entry = {
+                        "frame_idx": int(f_idx),
+                        "timestamp_sec": round(t_sec, 3),
+                        "timestamp": format_timestamp(t_sec),
+                        "bbox": [round(float(c), 2) for c in det["bbox"]],
+                        "confidence": round(float(det.get("conf", 0.0)), 3),
+                        "area": round(float(det.get("area", 0.0)), 1),
+                    }
+                    track_history_data["tracks"][str(tid)]["observations"].append(obs_entry)
+
+        history_file = self.output_dir / "track_history.json"
+        clean_history = make_json_serializable(track_history_data)
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(clean_history, f, indent=2)
+        logger.info(f"Saved frame-by-frame track history to '{history_file}'.")
 
         # Clean non-serializable fields before dumping to JSON
         json_tracks = []
@@ -429,7 +464,7 @@ class VehicleTrackingPipeline:
             "total_raw_tracks": len(tracks_meta),
             "tracked_vehicles_count": len(qualified_tracks),
             "output_video_path": f"{self.output_dir.as_posix()}/{output_video_name}",
-            "contact_sheet_grid_path": f"{self.output_dir.as_posix()}/tracks_grid.jpg",
+            "track_history_path": f"{self.output_dir.as_posix()}/track_history.json",
             "tracks": json_tracks,
         }
 

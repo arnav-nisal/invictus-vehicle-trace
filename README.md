@@ -17,9 +17,9 @@ An end-to-end computer vision and deep learning system built for real-world traf
 
 To maintain transparency and a persistent engineering audit trail throughout Hack-a-Sol 5.0, three living documentation files track our progress:
 
-- **[challanges.md](file:///Users/ashasathe/invictus-vehicle-trace/invictus-vehicle-trace/challanges.md)**: Real engineering hurdles encountered during development—compute bottlenecks, motion-blur vs. background clutter trade-offs, occlusion ID splits, perspective scale growth, dense-lane identity jumping, and overhead gantry bar occlusions.
-- **[solutions.md](file:///Users/ashasathe/invictus-vehicle-trace/invictus-vehicle-trace/solutions.md)**: Technical specifications, mathematical formulations, algorithms, and empirical verification results for each resolved challenge.
-- **[changes.md](file:///Users/ashasathe/invictus-vehicle-trace/invictus-vehicle-trace/changes.md)**: Chronological changelog with exact timestamps documenting repository milestones, pipeline iterations, and test runs.
+- **[challanges.md](challanges.md)**: Real engineering hurdles encountered during development—compute bottlenecks, motion-blur vs. background clutter trade-offs, occlusion ID splits, perspective scale growth, dense-lane identity jumping, overhead gantry bar occlusions, bumper-edge plate clipping, and frame extraction latency.
+- **[solutions.md](solutions.md)**: Technical specifications, mathematical formulations, algorithms, and empirical verification results for each resolved challenge.
+- **[changes.md](changes.md)**: Chronological changelog with exact timestamps documenting repository milestones, pipeline iterations, and test runs.
 
 ---
 
@@ -48,11 +48,14 @@ flowchart TD
         Splitter --> Stitcher["Trajectory & Central-Body Stitcher (stitcher.py)\n- Central body crop ([0.18-0.82]H, [0.12-0.88]W)\n- Velocity vector projection (lateral_err <= 65px)\n- Footprint allowance (>=60px)\n- Perspective growth tolerance (<=2.1x)\n- Disjoint-Set Union (DSU) clustering"]
         Stitcher --> PostFilter["Post-Tracking Clutter Pruning\n(min_frames=15, min_box_area=1200px)"]
         PostFilter --> BestCrop["Laplacian Sharpness Best-Crop Selector\n(crop_selector.py)"]
-        BestCrop --> Stage1Exports["Stage 1 Deliverables\n- Annotated Video with unified IDs\n- Laplacian Sharpest Crops\n- Visual Contact-Sheet Grid (tracks_grid.jpg)\n- Forensic tracks_summary.json"]
+        BestCrop --> Stage1Exports["Stage 1 Deliverables\n- Annotated Video with unified IDs\n- Forensic tracks_summary.json\n- Frame-by-Frame track_history.json\n- Laplacian Sharpest Crops"]
     end
 
-    subgraph Stage2["Stage 2: CV Bridge & Probabilistic Matching Engine"]
-        Stage1Exports --> CVBridge["CV Bridge (cv_bridge.py)\n- Plate OCR extraction with '?' wildcards\n- Dominant color extraction (HSV)\n- Body type mapping\n- TrackSummary packaging"]
+    subgraph Stage2["Stage 2: Target Vehicle Selection & Full-Track Crop Extraction"]
+        Stage1Exports --> Selection["Interactive / CLI Target Selection\n(scripts/run_tracking.py --target-id <ID> / --interactive)"]
+        Selection --> CropExtractor["Crop Extractor (crop_extractor.py)\n- 5% safety margin padding (anti-plate-clipping)\n- Full-track chronological crop extraction\n- outputs/<clip>/track_<ID>/vehicle_crops/"]
+        CropExtractor --> Manifest["Downstream Contract: crop_manifest.json\n(frame indices, padded bboxes, timestamps, confidences)"]
+        Manifest --> CVBridge["CV Bridge & Plate Detection / OCR\n- Plate OCR extraction with '?' wildcards\n- Dominant color extraction (HSV)\n- Body type mapping\n- TrackSummary packaging"]
         CVBridge --> FastAPI["FastAPI Backend (backend/main.py)"]
         FastAPI --> Matcher["Probabilistic Matcher (backend/matcher.py)\n- Weighted Composite Scoring\n  (Plate 50%, Colour 25%, Body 25%)\n- Visual confusion matrix (8<->B, 0<->D, 1<->I)\n- Wildcard slot handling for partial plates\n- Witness testimony bias modifier\n- Calibrated 'No Confident Match' gate (<65%)"]
         FastAPI --> RegistryDB[("Synthetic RTO Registry\n1,000+ Vehicles with HSRP standard")]
@@ -119,12 +122,18 @@ flowchart TD
   pip install -r requirements.txt
   ```
 
-### 2. Running the Tracking Pipeline
+### 2. Running Tracking & Vehicle Crop Extraction (Stage 1 & Stage 2)
 ```bash
-# Run on default clip (activa_signal.mp4)
-python scripts/run_tracking.py
+# 1. Run tracking and interactively select a vehicle from the terminal
+python scripts/run_tracking.py --video data/clips/activa_signal.mp4 --output-dir outputs --interactive
 
-# Run on a custom video with specific outputs
+# 2. Run tracking and directly extract all crops for a target vehicle (e.g. Track 27) with 5% safety margin padding
+python scripts/run_tracking.py --video data/clips/activa_signal.mp4 --output-dir outputs --target-id 27 --padding 0.05
+
+# 3. Instantaneously extract crops reusing existing tracking data (<50ms, no re-tracking)
+python scripts/run_tracking.py --video data/clips/activa_signal.mp4 --output-dir outputs --reuse-tracking --target-id 27
+
+# 4. Run on highway traffic with custom trajectory & lateral alignment thresholds
 python scripts/run_tracking.py \
   --video data/clips/highway_traffic.mp4 \
   --output-dir outputs/highway_traffic \

@@ -30,7 +30,7 @@ DEFAULT_TRACKER_CONFIG = str(Path(__file__).parent / "botsort_reid.yaml")
 DEFAULT_OUTPUT_DIR = "outputs"
 DEFAULT_TRACKS_DIR = "outputs/tracks"
 DEFAULT_SUMMARY_PATH = "outputs/tracks_summary.json"
-DEFAULT_GRID_PATH = "outputs/tracks_grid.jpg"
+DEFAULT_HISTORY_PATH = "outputs/track_history.json"
 
 # Pipeline defaults tuned for CCTV vehicle tracking
 DEFAULT_IMGSZ = 1280             # Full-resolution inference (1280px) for sharp distant/moving two-wheelers

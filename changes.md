@@ -96,3 +96,17 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - `changes.md`: Chronological changelog with timestamps.
 - Updated `README.md` with architecture diagrams, usage guides, and complete Hack-a-Sol 5.0 AI and open-source compliance disclosures.
 - Verified `.gitignore` and prepared staged Git tree for manual commit and push.
+
+### 2026-11-23 20:30:00 IST — Stage 2: Vehicle Selection & Full-Track Crop Extraction Architecture
+- Dropped contact-sheet grid (`tracks_grid.jpg`) generation in favour of full-track chronological crop extraction and frame-by-frame history.
+- Upgraded `cv_pipeline/pipeline.py` to export `outputs/track_history.json`, storing frame-by-frame bounding boxes, timestamps, confidences, and areas for every kept vehicle.
+- Created `cv_pipeline/crop_extractor.py`:
+  - `extract_vehicle_crops`: Pulls every video frame in which a chosen vehicle was active, applies a $5\%$ safety margin padding around bounding boxes to prevent bumper plate clipping, and writes chronological crops `frame_XXXXXX_crop.jpg`.
+  - `crop_manifest.json`: Generates a structured JSON metadata manifest containing crop indices, original/padded bounding boxes, dimensions, confidences, and timestamps.
+  - `interactive_vehicle_selection`: Displays detected vehicle summary table, annotated video path, and prompts user for target ID (or accepts `--target-id`).
+- Upgraded `scripts/run_tracking.py`:
+  - Added flags: `--target-id`, `--interactive`, `--reuse-tracking`, and `--padding`.
+  - Added instantaneous `--reuse-tracking` mode loading cached tracking and history data in $<50$ms.
+- Verified on `data/clips/activa_signal.mp4` with Target ID 27 (crossing white Activa):
+  - Extracted all 98 consecutive crops into `outputs/activa_signal/track_027/vehicle_crops/`.
+  - Saved manifest `outputs/activa_signal/track_027/crop_manifest.json`.

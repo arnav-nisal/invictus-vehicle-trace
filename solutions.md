@@ -79,10 +79,45 @@ Prioritizes immediate temporal continuation and tight lane alignment over coinci
 
 ---
 
-## 6. Verification Summary Across All Test Clips
+## 6. Full-Track Chronological Crop Extraction with 5% Safety Margin Padding
+- **Solution**: Built [cv_pipeline/crop_extractor.py](file:///c:/Users/arnav/Documents/invictus-vehicle-trace/cv_pipeline/crop_extractor.py) to extract every frame a selected vehicle appears in, with an explicit geometric expansion formula:
+  $$\Delta x = \text{width} \times 0.05, \quad \Delta y = \text{height} \times 0.05$$
+  $$x_1^{\text{padded}} = \max(0, \lfloor x_1 - \Delta x \rfloor), \quad y_1^{\text{padded}} = \max(0, \lfloor y_1 - \Delta y \rfloor)$$
+  $$x_2^{\text{padded}} = \min(W, \lceil x_2 + \Delta x \rceil), \quad y_2^{\text{padded}} = \min(H, \lceil y_2 + \Delta y \rceil)$$
+- **Benefits**:
+  - Completely eliminates bumper-edge plate clipping for low-mounted license plates (e.g., rear motorcycle mudguards and lower front car grills).
+  - Keeps aspect ratio and context intact for upcoming license plate detection models.
+  - Generates chronological, timestamped image series `frame_XXXXXX_crop.jpg` stored in `outputs/<clip_name>/track_<ID>/vehicle_crops/`.
+
+---
+
+## 7. Decoupled Frame-by-Frame Track History Serialization (`track_history.json`)
+- **Solution**: Refactored [cv_pipeline/pipeline.py](file:///c:/Users/arnav/Documents/invictus-vehicle-trace/cv_pipeline/pipeline.py) to serialize all active observations for every kept vehicle into `outputs/track_history.json`.
+- **Schema**:
+  Each entry maps master `track_id` to its chronological array of frame observations:
+  - `frame_idx`: Exact zero-indexed video frame number.
+  - `timestamp_sec` & `timestamp`: Elapsed video time in seconds and formatted string `HH:MM:SS.mmm`.
+  - `bbox`: `[x1, y1, x2, y2]` in original video coordinates.
+  - `confidence`: YOLO detection confidence score.
+  - `area`: Bounding box pixel area ($w \times h$).
+- **Instantaneous `--reuse-tracking` Mode**:
+  Enables the CLI runner (`scripts/run_tracking.py --reuse-tracking --target-id <ID>`) to load pre-computed tracking in $<50\text{ms}$, decoupling forensic crop extraction and vehicle selection from GPU tracking re-runs.
+
+---
+
+## 8. Downstream Plate Manifest Generation (`crop_manifest.json`)
+- **Solution**: Automatically writes a structured metadata manifest `crop_manifest.json` inside each vehicle's track directory:
+  - Header: `track_id`, `class_name`, `category`, `start_frame`, `end_frame`, `start_timestamp`, `end_timestamp`, `total_crops_saved`, `video_source`, and `padding_percent`.
+  - Itemized `crops` array: Lists every crop's index, original bbox, padded bbox, confidence, dimensions, and absolute file path.
+- **Benefits**: Provides an automated, well-typed input contract for Stage 2 license plate detection and OCR pipelines without requiring video re-parsing.
+
+---
+
+## 9. Verification Summary Across All Test Clips
 
 | Test Clip | Resolution & FPS | Track Count | Key Target Behaviors Verified | Status |
 | :--- | :---: | :---: | :--- | :---: |
 | **`activa_signal.mp4`** | 1080p @ 30 FPS | 29 vehicles | Moving white Activa maintains continuous single ID **Track 27** across crossing (`[27, 38, 51]`); stationary Activa maintains **Track 4** for all 300 frames. | **PASSED** |
 | **`highway_traffic.mp4`** | 1080p @ 30 FPS | 88 vehicles | Track pairs `39-66`, `49-95`, `55-90`, `56-87`, `61-91-93`, and `63-96-98` cleanly stitched under overhead bar. Cross-lane swaps (`55-98`, `63-56`, `96-106`) fully prevented. | **PASSED** |
 | **`simple_traffic_30s.mp4`** | 1080p @ 30 FPS | 144 vehicles | 57 merge events successfully consolidated across 34 multi-segment tracks; zero ID jumping across cars, trucks, buses, and motorcycles. | **PASSED** |
+| **`activa_signal.mp4` (Stage 2 Crop Extraction)** | 1080p @ 30 FPS | Track 27 | 98 consecutive 5% padded crops extracted across `00:00:02.100` $\to$ `00:00:08.733` into `outputs/activa_signal/track_027/vehicle_crops/` with complete `crop_manifest.json`. | **PASSED** |

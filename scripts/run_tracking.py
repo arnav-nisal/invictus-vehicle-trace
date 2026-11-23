@@ -2,6 +2,7 @@
 """CLI runner for the vehicle tracking pipeline."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from cv_pipeline.pipeline import VehicleTrackingPipeline
+from cv_pipeline.crop_extractor import interactive_vehicle_selection, extract_vehicle_crops
 from cv_pipeline.config import (
     DEFAULT_MODEL_PATH,
     DEFAULT_TRACKER_CONFIG,
@@ -116,6 +118,30 @@ def parse_args():
         default=DEFAULT_MAX_LATERAL_ERR_PX,
         help=f"Maximum lateral cross-lane error in px for tracklet stitching (default: {DEFAULT_MAX_LATERAL_ERR_PX}px)",
     )
+    parser.add_argument(
+        "--target-id",
+        type=int,
+        default=None,
+        help="Target Vehicle Tracking ID to extract full-track vehicle crops for (e.g. 27)",
+    )
+    parser.add_argument(
+        "--interactive",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prompt interactively to select a Vehicle Tracking ID after tracking (default: True, use --no-interactive to disable)",
+    )
+    parser.add_argument(
+        "--reuse-tracking",
+        action="store_true",
+        default=False,
+        help="Reuse existing tracks_summary.json and track_history.json if present in output-dir without re-running tracking",
+    )
+    parser.add_argument(
+        "--padding",
+        type=float,
+        default=0.05,
+        help="Safety margin padding percentage around bounding box for vehicle crops (default: 0.05 = 5%)",
+    )
     return parser.parse_args()
 
 
@@ -146,22 +172,41 @@ def main():
     print(f" Output Video Name:  {output_video_name}")
     print("=" * 80)
 
-    pipeline = VehicleTrackingPipeline(
-        model_path=args.model,
-        tracker_config=args.tracker,
-        output_dir=args.output_dir,
-        imgsz=args.imgsz,
-        min_frames=args.min_frames,
-        conf_threshold=args.conf,
-        min_box_area=args.min_area,
-        device=args.device,
-        max_stitch_gap_sec=args.max_gap,
-        max_stitch_speed_px_s=args.max_speed,
-        max_size_ratio=args.max_size_ratio,
-        max_lateral_err_px=args.max_lateral_err,
-    )
+    # Check for reuse-tracking
+    summary_path = Path(args.output_dir) / "tracks_summary.json"
+    history_path = Path(args.output_dir) / "track_history.json"
+    
+    if args.reuse_tracking and summary_path.exists() and history_path.exists():
+        print(f"\n[INFO] --reuse-tracking flag detected. Loading existing tracking data from {args.output_dir}...")
+        with open(summary_path, "r") as f:
+            summary = json.load(f)
+        with open(history_path, "r") as f:
+            track_history = json.load(f)
+        print(f"[INFO] Loaded {len(summary.get('tracks', []))} tracks and {len(track_history)} history vehicle traces successfully.")
+    else:
+        pipeline = VehicleTrackingPipeline(
+            model_path=args.model,
+            tracker_config=args.tracker,
+            output_dir=args.output_dir,
+            imgsz=args.imgsz,
+            min_frames=args.min_frames,
+            conf_threshold=args.conf,
+            min_box_area=args.min_area,
+            device=args.device,
+            max_stitch_gap_sec=args.max_gap,
+            max_stitch_speed_px_s=args.max_speed,
+            max_size_ratio=args.max_size_ratio,
+            max_lateral_err_px=args.max_lateral_err,
+        )
 
-    summary = pipeline.run(video_path=args.video, output_video_name=output_video_name)
+        summary = pipeline.run(video_path=args.video, output_video_name=output_video_name)
+        
+        # Load track history produced by pipeline
+        if history_path.exists():
+            with open(history_path, "r") as f:
+                track_history = json.load(f)
+        else:
+            track_history = {}
 
     # Report split abrupt jumps
     splits = summary.get("split_jumps", [])
@@ -218,10 +263,22 @@ def main():
     print("-" * 115)
     print(f"Inference Device: {summary.get('device_name', summary.get('device'))}")
     print(f"Annotated Video:  {summary['output_video_path']}")
-    print(f"Contact Sheet:    {summary['contact_sheet_grid_path']}")
+    if summary.get('track_history_path'):
+        print(f"Track History:    {summary['track_history_path']}")
     print(f"Summary JSON:     {args.output_dir}/tracks_summary.json")
     print(f"Cropped Images:   {args.output_dir}/tracks/ ({len(tracks)} images saved)")
     print("=" * 80)
+
+    # Stage 2: Interactive or Target Vehicle Selection & Full-Track Cropping
+    if (args.target_id is not None or args.interactive) and track_history:
+        interactive_vehicle_selection(
+            summary_data=summary,
+            track_history=track_history,
+            video_path=args.video,
+            output_dir=args.output_dir,
+            target_id=args.target_id,
+            padding_pct=args.padding,
+        )
 
 
 if __name__ == "__main__":
