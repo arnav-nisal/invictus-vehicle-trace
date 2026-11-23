@@ -1,15 +1,49 @@
+# Python Virtual Environment
 .venv/
+venv/
+ENV/
+
+# Python Cache & Bytecode
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Deep Learning Models & Weights
 *.pt
+*.pth
 *.onnx
+*.bin
+*.engine
+
+# Database files
+*.db
+*.sqlite3
+
+# Video & Large Media Files
 *.mp4
 *.avi
-outputs/
+*.mov
+*.mkv
 data/clips/
-*.db
+
+# Output Directories & Generated Visuals
+outputs/
+
+# Environment & Config Secrets
 .env
-node_modules/
-dist/
+.env.*
+
+# IDE & OS Metadata
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+
+# Workspace Skills & Subagents
+.agent/
 .agents/skills/
+node_modules/
