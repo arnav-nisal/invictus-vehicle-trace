@@ -51,6 +51,17 @@ def print_matches_table(response: AnalysisResponse):
             print(f"  • {reason}")
 
 
+try:
+    import pytest
+
+    @pytest.fixture
+    def vehicles():
+        db_path = ensure_db_exists()
+        return get_all_registry_vehicles(db_path)
+except ImportError:
+    pass
+
+
 def test_scenario_1_blurry_scooter(vehicles):
     print_header("Test 1: Blurry Partial Plate (GT-1 White Scooter vs 3 Hard Decoys)")
     scenario = DEMO_SCENARIOS["scenario-1"]
@@ -75,7 +86,6 @@ def test_scenario_1_blurry_scooter(vehicles):
     assert any("witness hint" in r.lower() for r in response_hint.top_matches[0].match_reasons)
 
     print("\n>>> TEST 1 PASSED: GT-1 ranked #1 and convincingly beat all 3 hard decoys!")
-    return True
 
 
 def test_scenario_2_ocr_confusion(vehicles):
@@ -99,7 +109,6 @@ def test_scenario_2_ocr_confusion(vehicles):
     assert scores["DL03CB8051"] > scores.get("DL03CB80S1", 0.0), "GT-2 must beat Decoy 2C (5 vs S)"
 
     print("\n>>> TEST 2 PASSED: GT-2 ranked #1 via 8↔B OCR confusion tolerance and RTO syntax rules!")
-    return True
 
 
 def test_scenario_3_partial_auto_rickshaw(vehicles):
@@ -118,7 +127,6 @@ def test_scenario_3_partial_auto_rickshaw(vehicles):
     assert scores["MH02AZ5820"] > scores.get("MH02AZ582D", 0.0), "GT-4 must beat Decoy 4C"
 
     print("\n>>> TEST 3 PASSED: GT-4 ranked #1 combining partial plate hits and vehicle attributes!")
-    return True
 
 
 def test_scenario_4_out_of_registry(vehicles):
@@ -131,7 +139,6 @@ def test_scenario_4_out_of_registry(vehicles):
     assert "no confident match" in response.explanation.lower(), "Explanation must indicate lack of confident match"
 
     print("\n>>> TEST 4 PASSED: Unregistered vehicle correctly gated as 'No Confident Match'!")
-    return True
 
 
 def test_fastapi_endpoints(vehicles):
@@ -186,7 +193,7 @@ def test_fastapi_endpoints(vehicles):
         # 2. Demo scenarios
         code, scenarios = await call_api("GET", "/api/demo-scenarios")
         assert code == 200, f"Demo scenarios returned {code}"
-        assert len(scenarios) == 4
+        assert len(scenarios) >= 4
         print(f"  [✓] GET /api/demo-scenarios -> 200 OK ({len(scenarios)} scenarios available)")
 
         # 3. Video scan
@@ -222,7 +229,6 @@ def test_fastapi_endpoints(vehicles):
 
     asyncio.run(run_tests())
     print("\n>>> TEST 5 PASSED: All FastAPI endpoints operational and returning valid schemas!")
-    return True
 
 
 def main():

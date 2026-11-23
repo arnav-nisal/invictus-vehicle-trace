@@ -124,6 +124,7 @@ export const App: React.FC = () => {
       const analysis = await analyzeVehicle({
         scenario_id: scenario.id,
         known_partial_plate: hint || undefined,
+        rto_priors: scenario.evidence?.rto_priors ?? undefined,
       }).catch((apiErr) => {
         console.warn('Live analyze API error, using scenario evidence:', apiErr);
         // Fallback to local scenario simulation if backend is offline

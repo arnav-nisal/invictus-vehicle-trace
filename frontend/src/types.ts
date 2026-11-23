@@ -33,6 +33,8 @@ export interface FrameEvidence {
 export interface VehicleEvidence {
   track_id: number;
   consensus_plate: string;
+  /** False when no plate was detected (visual-only tracking mode). */
+  plate_detected?: boolean;
   char_confidences: number[];
   colour: string;
   colour_conf: number;
@@ -43,6 +45,8 @@ export interface VehicleEvidence {
   model?: string;
   model_conf?: number;
   frames_used: FrameEvidence[];
+  /** RTO spatial prior probability distribution, e.g. {"MH14": 0.80, "MH12": 0.12}. */
+  rto_priors?: Record<string, number> | null;
   warning?: string | null;
 }
 
@@ -62,9 +66,35 @@ export interface MatchCandidate {
   model: string;
   rto_city: string;
   synthetic_owner_id: string;
+  owner_name?: string | null;
+  registered_rto?: string | null;
+  registration_year?: number | null;
+  watchlist_status: 'CLEAR' | 'STOLEN' | 'FLAGGED' | string;
   composite_score: number;
+  /** Forensic total confidence (plate + rto + visual fusion). */
+  total_confidence: number;
+  /** Plate-only score from OCR confusion-aware alignment. */
+  plate_score?: number | null;
+  /** RTO spatial prior score. */
+  rto_prior_score?: number | null;
+  /** Visual VLM attribute score. */
+  visual_score?: number | null;
+  /** Character-by-character alignment diff string from backend. */
+  character_diff?: string | null;
+  /** Forensic anomaly flags, e.g. ["SUSPECTED_CLONED_PLATE"]. */
+  anomaly_flags: string[];
   score_breakdown: ScoreBreakdown;
   match_reasons: string[];
+}
+
+export interface SightingRecord {
+  sighting_id: number;
+  track_id?: number | null;
+  camera_id: string;
+  timestamp: string;
+  top_matched_plate: string;
+  confidence: number;
+  crop_path?: string | null;
 }
 
 export interface AnalysisResponse {

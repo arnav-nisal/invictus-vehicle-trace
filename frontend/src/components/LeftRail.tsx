@@ -74,13 +74,15 @@ export const LeftRail: React.FC<LeftRailProps> = ({
         </div>
 
         {/* Horizontal Scenario Pills */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
           {scenarios.map((scenario, idx) => {
             const isSelected = selectedScenarioId === scenario.id;
             const isBlur = scenario.id === 'scenario-1';
             const isConfusion = scenario.id === 'scenario-2';
             const isPartial = scenario.id === 'scenario-3';
             const isOutOfReg = scenario.id === 'scenario-4';
+            const isCloned = scenario.id === 'scenario-5';
+            const isRtoPrior = scenario.id === 'scenario-6';
             const titleClean = (scenario.title || `Scenario ${idx + 1}`).replace(/Scenario \d+: /, '');
             const plate = scenario.evidence?.consensus_plate || 'UNKNOWN';
 
@@ -109,10 +111,14 @@ export const LeftRail: React.FC<LeftRailProps> = ({
                         ? 'bg-amber-100 text-amber-700'
                         : isBlur
                         ? 'bg-blue-100 text-blue-700'
+                        : isCloned
+                        ? 'bg-rose-100 text-rose-700'
+                        : isRtoPrior
+                        ? 'bg-purple-100 text-purple-700'
                         : 'bg-emerald-100 text-emerald-700'
                     }`}
                   >
-                    {isOutOfReg ? 'Out-Reg' : isConfusion ? 'Confusion' : isBlur ? 'Blurry' : 'Multi-Attr'}
+                    {isOutOfReg ? 'Out-Reg' : isConfusion ? 'Confusion' : isBlur ? 'Blurry' : isCloned ? 'Cloned?' : isRtoPrior ? 'RTO Prior' : 'Multi-Attr'}
                   </span>
                 </div>
 

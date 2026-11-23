@@ -260,17 +260,27 @@ class VehicleEvidence(BaseModel):
         description="Warning or outage notice from attribute extraction (e.g. VLM cascade failure).",
         examples=["All open-source VLM tiers failed: Tier 1 (NVIDIA NIM): ..."],
     )
+    plate_detected: bool = Field(
+        default=True,
+        description="Whether a license plate was detected on the vehicle (False triggers VISUAL_ONLY mode).",
+        examples=[True],
+    )
+    rto_priors: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Optional RTO prior probability distribution (e.g. {'MH14': 0.80, 'MH12': 0.12}).",
+        examples=[{"MH14": 0.80, "MH12": 0.12}],
+    )
 
     @field_validator("consensus_plate")
     @classmethod
     def validate_plate_format(cls, v: str) -> str:
         """Normalize plate format: uppercase and allow alphanumeric plus '?' placeholders."""
         cleaned = v.strip().upper().replace(" ", "").replace("-", "")
-        if not cleaned:
-            raise ValueError("consensus_plate cannot be empty.")
-        # Ensure only alphanumeric and '?' are present
+        if not cleaned or cleaned in ("NO_PLATE", "UNKNOWN", "NONE"):
+            return cleaned or "NO_PLATE"
+        # Ensure only alphanumeric and '?', '_' are present
         for ch in cleaned:
-            if not (ch.isalnum() or ch == "?"):
+            if not (ch.isalnum() or ch in ("?", "_")):
                 raise ValueError(f"Invalid character '{ch}' in consensus_plate '{v}'. Use '?' for unreadable characters.")
         return cleaned
 
@@ -318,6 +328,28 @@ class RegistryVehicle(BaseModel):
         description="100% synthetic privacy-preserving owner identifier (NEVER real names).",
         examples=["SYN-OWN-1001"],
     )
+    owner_name: str = Field(
+        default="Unknown",
+        description="100% synthetic vehicle owner name (NEVER real personal data).",
+        examples=["Aarav Sharma"],
+    )
+    registered_rto: str = Field(
+        default="",
+        description="Official registered RTO office authority.",
+        examples=["MH-12 Pune RTO, Maharashtra"],
+    )
+    registration_year: int = Field(
+        default=2021,
+        ge=1990,
+        le=2030,
+        description="Year of initial vehicle registration.",
+        examples=[2021],
+    )
+    watchlist_status: str = Field(
+        default="CLEAR",
+        description="Law enforcement surveillance watchlist status: CLEAR, STOLEN, FLAGGED.",
+        examples=["CLEAR"],
+    )
 
 
 class ScoreBreakdown(BaseModel):
@@ -351,6 +383,20 @@ class ScoreBreakdown(BaseModel):
         le=1.0,
         description="Secondary heuristic score for make/model consistency if detected.",
         examples=[0.8],
+    )
+    rto_prior_score: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="RTO prefix prior probability score.",
+        examples=[0.82],
+    )
+    visual_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Combined visual attribute score (body, colour, make, model).",
+        examples=[0.95],
     )
 
 
@@ -400,12 +446,59 @@ class MatchCandidate(BaseModel):
         description="Synthetic owner identifier (NEVER real names).",
         examples=["SYN-OWN-1001"],
     )
+    owner_name: Optional[str] = Field(
+        default=None,
+        description="100% synthetic owner name for candidate.",
+        examples=["Aarav Sharma"],
+    )
+    registered_rto: Optional[str] = Field(
+        default=None,
+        description="Registered RTO jurisdiction office.",
+        examples=["MH-12 Pune RTO, Maharashtra"],
+    )
+    registration_year: Optional[int] = Field(
+        default=None,
+        description="Year of vehicle registration.",
+        examples=[2021],
+    )
+    watchlist_status: str = Field(
+        default="CLEAR",
+        description="Watchlist status: CLEAR, STOLEN, FLAGGED.",
+        examples=["CLEAR"],
+    )
     composite_score: float = Field(
         ...,
         ge=0.0,
         le=1.0,
         description="Weighted composite confidence score (0.0 to 1.0).",
         examples=[0.985],
+    )
+    total_confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Total forensic matching confidence score (0.0 to 1.0).",
+        examples=[0.985],
+    )
+    character_diff: Optional[str] = Field(
+        default=None,
+        description="Character-by-character alignment diff (e.g. 'M H 1 2 [?->D] [?->E] 1 4 3 2').",
+        examples=["M H 1 2 [?->D] [?->E] 1 4 3 2"],
+    )
+    anomaly_flags: List[str] = Field(
+        default_factory=list,
+        description="Forensic anomaly flags, e.g. ['SUSPECTED_CLONED_PLATE'].",
+        examples=[["SUSPECTED_CLONED_PLATE"]],
+    )
+    rto_prior_score: Optional[float] = Field(
+        default=None,
+        description="Candidate RTO prior score.",
+        examples=[0.82],
+    )
+    visual_score: Optional[float] = Field(
+        default=None,
+        description="Candidate visual score.",
+        examples=[0.95],
     )
     score_breakdown: ScoreBreakdown = Field(
         ...,
@@ -481,6 +574,59 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description="Optional investigator witness hint or known partial plate characters.",
         examples=["MH12DE"],
+    )
+    camera_id: Optional[str] = Field(
+        default="CAM_01",
+        description="Surveillance camera identifier where vehicle was sighted.",
+        examples=["CAM_01", "CAM_04"],
+    )
+    rto_priors: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Optional RTO prior probability distribution (e.g. {'MH14': 0.80, 'MH12': 0.12}).",
+        examples=[{"MH14": 0.80, "MH12": 0.12}],
+    )
+
+
+class SightingRecord(BaseModel):
+    """Timeline sighting entry across distributed CCTV camera nodes."""
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    sighting_id: int = Field(
+        ...,
+        description="Unique auto-incrementing sighting identifier.",
+        examples=[1],
+    )
+    track_id: Optional[int] = Field(
+        default=None,
+        description="Track identifier from the CCTV video processor.",
+        examples=[101],
+    )
+    camera_id: str = Field(
+        default="CAM_01",
+        description="Identifier of camera node capturing sighting.",
+        examples=["CAM_01"],
+    )
+    timestamp: str = Field(
+        ...,
+        description="Timestamp string of the vehicle sighting.",
+        examples=["2026-11-23 08:30:15"],
+    )
+    top_matched_plate: str = Field(
+        ...,
+        description="Top matched license plate number registered in sighting.",
+        examples=["MH12DE1432"],
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score of top plate match.",
+        examples=[0.985],
+    )
+    crop_path: Optional[str] = Field(
+        default=None,
+        description="Relative file path to cropped vehicle evidence image.",
+        examples=["outputs/crops/track_001_frame_0042_vehicle.jpg"],
     )
 
 

@@ -18,7 +18,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from backend.database import ensure_db_exists, get_all_registry_vehicles, get_total_vehicles_count
+from backend.database import (
+    ensure_db_exists,
+    get_all_registry_vehicles,
+    get_sightings_by_plate,
+    get_total_vehicles_count,
+    record_sighting,
+)
 from backend.demo_data import DEMO_SCENARIOS, MOCK_VIDEO_SCAN_RESPONSE
 from backend.cv_bridge import (
     get_vehicle_evidence_for_track,
@@ -30,6 +36,7 @@ from backend.schemas import (
     AnalysisResponse,
     AnalyzeRequest,
     DemoScenario,
+    SightingRecord,
     VehicleEvidence,
     VideoScanResponse,
 )
@@ -285,10 +292,15 @@ async def analyze_vehicle(
         )
 
     # Execute custom multi-signal probabilistic matching engine
+    rto_priors = payload.rto_priors or getattr(evidence, "rto_priors", None)
+    if rto_priors and getattr(evidence, "rto_priors", None) is None:
+        evidence.rto_priors = rto_priors
+
     result = match_and_rank_vehicles(
         evidence=evidence,
         registry_vehicles=registry_vehicles,
         known_partial_plate=known_hint,
+        rto_priors=rto_priors,
         top_k=5,
     )
 
@@ -296,7 +308,43 @@ async def analyze_vehicle(
     if evidence.warning:
         result.warning = evidence.warning
 
+    # Automatically log sighting if a confident match was produced
+    if not result.no_confident_match and result.top_matches:
+        top_cand = result.top_matches[0]
+        crop_path = None
+        if evidence.frames_used and len(evidence.frames_used) > 0:
+            crop_path = evidence.frames_used[0].image_path or evidence.frames_used[0].plate_crop_path
+        camera_id = payload.camera_id or "CAM_01"
+        try:
+            record_sighting(
+                track_id=evidence.track_id,
+                camera_id=camera_id,
+                top_matched_plate=top_cand.plate_number,
+                confidence=top_cand.composite_score,
+                crop_path=crop_path,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to auto-record sighting for plate {top_cand.plate_number}: {e}")
+
     return result
+
+
+@app.get(
+    "/api/sightings/{plate_number}",
+    response_model=List[SightingRecord],
+    summary="Get Multi-Camera Sighting History for Plate",
+    tags=["Sightings"],
+)
+async def get_plate_sightings(plate_number: str) -> List[SightingRecord]:
+    """Retrieve all historical multi-camera sightings for a license plate ordered by timestamp ASC."""
+    try:
+        return get_sightings_by_plate(plate_number)
+    except Exception as e:
+        logger.error(f"Error querying sightings for plate '{plate_number}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query sightings for plate: {plate_number}",
+        )
 
 
 @app.post(

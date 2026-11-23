@@ -218,6 +218,23 @@ def generate_forensic_html_report(
         # Match reasons list
         reasons_list = "".join(f"<li>{html.escape(r)}</li>" for r in cand.match_reasons)
 
+        wl_status = (cand.watchlist_status or "CLEAR").upper()
+        if wl_status == "STOLEN":
+            wl_badge = '<span class="watchlist-badge badge-stolen">⚠️ STOLEN</span>'
+        elif wl_status == "FLAGGED":
+            wl_badge = '<span class="watchlist-badge badge-flagged">🚩 FLAGGED</span>'
+        else:
+            wl_badge = '<span class="watchlist-badge badge-clear">✓ CLEAR</span>'
+
+        anomaly_badges = []
+        if getattr(cand, "anomaly_flags", None):
+            for flag in cand.anomaly_flags:
+                if flag == "SUSPECTED_CLONED_PLATE":
+                    anomaly_badges.append('<span class="anomaly-badge badge-cloned">⚠️ SUSPECTED CLONED PLATE</span>')
+                else:
+                    anomaly_badges.append(f'<span class="anomaly-badge">{html.escape(flag)}</span>')
+        anomaly_html = f'<div class="anomaly-flags-row">{"".join(anomaly_badges)}</div>' if anomaly_badges else ""
+
         candidates_html.append(
             f'<div class="candidate-card {"primary-candidate" if cand.rank == 1 else ""}">'
             f'  <div class="candidate-header">'
@@ -225,6 +242,7 @@ def generate_forensic_html_report(
             f'    <div class="candidate-plate-group">'
             f'      <div class="diff-chips-row">{diff_chips_rendered}</div>'
             f'      <span class="candidate-plate-text">{cand.plate_number}</span>'
+            f'      {anomaly_html}'
             f'    </div>'
             f'    <div class="candidate-score-block">'
             f'      <span class="score-label">Composite Match</span>'
@@ -235,7 +253,10 @@ def generate_forensic_html_report(
             f'    <div class="candidate-meta-grid">'
             f'      <div class="meta-item"><span class="meta-k">Vehicle Make & Model:</span> <span class="meta-v"><strong>{html.escape(cand.make)} {html.escape(cand.model)}</strong></span></div>'
             f'      <div class="meta-item"><span class="meta-k">Body & Colour:</span> <span class="meta-v">{html.escape(cand.colour.capitalize())} {html.escape(cand.body_type)}</span></div>'
-            f'      <div class="meta-item"><span class="meta-k">Registered Jurisdiction:</span> <span class="meta-v">{html.escape(cand.rto_city)}</span></div>'
+            f'      <div class="meta-item"><span class="meta-k">Registered Jurisdiction:</span> <span class="meta-v">{html.escape(cand.registered_rto or cand.rto_city)}</span></div>'
+            f'      <div class="meta-item"><span class="meta-k">Registration Year:</span> <span class="meta-v">{cand.registration_year or "N/A"}</span></div>'
+            f'      <div class="meta-item"><span class="meta-k">Owner Name (Synthetic):</span> <span class="meta-v"><strong>{html.escape(cand.owner_name or "Unknown")}</strong></span></div>'
+            f'      <div class="meta-item"><span class="meta-k">Watchlist Status:</span> <span class="meta-v">{wl_badge}</span></div>'
             f'      <div class="meta-item"><span class="meta-k">Synthetic Owner ID:</span> <span class="meta-v font-mono">{html.escape(cand.synthetic_owner_id)}</span></div>'
             f'    </div>'
             f'    <div class="score-bars-container">'
@@ -661,6 +682,50 @@ def generate_forensic_html_report(
     .rank-other {{
       background-color: #64748b;
       color: #ffffff;
+    }}
+    .watchlist-badge {{
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }}
+    .badge-stolen {{
+      background-color: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #f87171;
+    }}
+    .badge-flagged {{
+      background-color: #fffbeb;
+      color: #b45309;
+      border: 1px solid #fcd34d;
+    }}
+    .badge-clear {{
+      background-color: #f0fdf4;
+      color: #15803d;
+      border: 1px solid #86efac;
+    }}
+    .anomaly-flags-row {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 8px;
+    }}
+    .anomaly-badge {{
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }}
+    .badge-cloned {{
+      background-color: #fef2f2;
+      color: #dc2626;
+      border: 1px solid #ef4444;
     }}
     .candidate-plate-group {{
       display: flex;

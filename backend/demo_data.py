@@ -6,7 +6,7 @@ summaries so the frontend and API work seamlessly end-to-end.
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from backend.schemas import (
     BodyType,
@@ -18,7 +18,185 @@ from backend.schemas import (
 )
 
 # ---------------------------------------------------------------------------
-# 4 Ready-to-Run Realistic VehicleEvidence Demo Scenarios
+# 6 Curated Ground-Truth Dummy Benchmark Cases (Seeded into Registry)
+# ---------------------------------------------------------------------------
+
+DUMMY_CASES: List[Dict[str, Any]] = [
+    {
+        "case_id": "CASE-1",
+        "title": "Clean High-Confidence Plate Verification",
+        "plate_number": "MH12DE1432",
+        "body_type": "two-wheeler",
+        "colour": "white",
+        "make": "Honda",
+        "model": "Activa 6G",
+        "rto_city": "Pune, Maharashtra",
+        "registered_rto": "MH-12 Pune RTO, Maharashtra",
+        "registration_year": 2021,
+        "owner_name": "Aarav Sharma",
+        "synthetic_owner_id": "SYN-OWN-1001",
+        "watchlist_status": "CLEAR",
+        "simulated_evidence": VehicleEvidence(
+            track_id=1,
+            consensus_plate="MH12DE1432",
+            char_confidences=[0.99] * 10,
+            colour="white",
+            colour_conf=0.96,
+            body_type=BodyType.TWO_WHEELER,
+            body_type_conf=0.98,
+            make="Honda",
+            make_conf=0.95,
+            model="Activa 6G",
+            model_conf=0.92,
+        ),
+    },
+    {
+        "case_id": "CASE-2",
+        "title": "OCR Confusion Recovery on Stolen Vehicle",
+        "plate_number": "DL03CB8051",
+        "body_type": "suv",
+        "colour": "red",
+        "make": "Tata",
+        "model": "Nexon",
+        "rto_city": "Delhi Central, Delhi",
+        "registered_rto": "DL-03 Sheikh Sarai RTO, Delhi",
+        "registration_year": 2022,
+        "owner_name": "Vikram Malhotra",
+        "synthetic_owner_id": "SYN-OWN-1005",
+        "watchlist_status": "STOLEN",  # Deliberately marked STOLEN
+        "simulated_evidence": VehicleEvidence(
+            track_id=2,
+            consensus_plate="DL03C88051",  # OCR read '8' instead of series letter 'B'
+            char_confidences=[0.98, 0.97, 0.95, 0.94, 0.92, 0.35, 0.96, 0.95, 0.94, 0.97],
+            colour="red",
+            colour_conf=0.95,
+            body_type=BodyType.SUV,
+            body_type_conf=0.96,
+            make="Tata",
+            make_conf=0.94,
+            model="Nexon",
+            model_conf=0.91,
+        ),
+    },
+    {
+        "case_id": "CASE-3",
+        "title": "Visual-Only Tracking When Plate Is Undetected",
+        "plate_number": "MH02AZ5820",
+        "body_type": "auto-rickshaw",
+        "colour": "yellow",
+        "make": "Bajaj",
+        "model": "Compact 4S",
+        "rto_city": "Mumbai West, Maharashtra",
+        "registered_rto": "MH-02 Andheri RTO, Maharashtra",
+        "registration_year": 2019,
+        "owner_name": "Ramesh Patil",
+        "synthetic_owner_id": "SYN-OWN-1013",
+        "watchlist_status": "FLAGGED",  # Deliberately marked FLAGGED
+        "simulated_evidence": VehicleEvidence(
+            track_id=3,
+            consensus_plate="NO_PLATE",
+            plate_detected=False,
+            char_confidences=[],
+            colour="yellow",
+            colour_conf=0.95,
+            body_type=BodyType.AUTO_RICKSHAW,
+            body_type_conf=0.98,
+            make="Bajaj",
+            make_conf=0.95,
+            model="Compact 4S",
+            model_conf=0.92,
+        ),
+    },
+    {
+        "case_id": "CASE-4",
+        "title": "Visual Attribute Disambiguation Over Hard Lookalikes",
+        "plate_number": "KA01MJ4096",
+        "body_type": "car",
+        "colour": "silver",
+        "make": "Maruti Suzuki",
+        "model": "Dzire",
+        "rto_city": "Bengaluru Central, Karnataka",
+        "registered_rto": "KA-01 Koramangala RTO, Karnataka",
+        "registration_year": 2020,
+        "owner_name": "Priya Nair",
+        "synthetic_owner_id": "SYN-OWN-1009",
+        "watchlist_status": "CLEAR",
+        "simulated_evidence": VehicleEvidence(
+            track_id=4,
+            consensus_plate="KA01??4096",  # Series letters occluded
+            char_confidences=[0.98, 0.98, 0.97, 0.97, 0.15, 0.15, 0.99, 0.98, 0.99, 0.98],
+            colour="silver",
+            colour_conf=0.95,
+            body_type=BodyType.CAR,
+            body_type_conf=0.96,
+            make="Maruti Suzuki",
+            make_conf=0.94,
+            model="Dzire",
+            model_conf=0.92,
+        ),
+    },
+    {
+        "case_id": "CASE-5",
+        "title": "Cloned Plate Anomaly Detection (Truck vs Two-Wheeler)",
+        "plate_number": "TN09BY7104",
+        "body_type": "truck",
+        "colour": "blue",
+        "make": "Tata",
+        "model": "407 Gold",
+        "rto_city": "Chennai South, Tamil Nadu",
+        "registered_rto": "TN-09 K.K. Nagar RTO, Tamil Nadu",
+        "registration_year": 2018,
+        "owner_name": "Karthik Subramanian",
+        "synthetic_owner_id": "SYN-OWN-1017",
+        "watchlist_status": "CLEAR",
+        "simulated_evidence": VehicleEvidence(
+            track_id=5,
+            consensus_plate="TN09BY7104",  # High-confidence plate match
+            char_confidences=[0.99] * 10,
+            colour="red",  # High-confidence visual contradiction (red two-wheeler vs blue truck)
+            colour_conf=0.95,
+            body_type=BodyType.TWO_WHEELER,
+            body_type_conf=0.95,
+            make="Honda",
+            make_conf=0.92,
+            model="Activa",
+            model_conf=0.90,
+        ),
+    },
+    {
+        "case_id": "CASE-6",
+        "title": "Om's RTO Prior Boost for Occluded Prefix",
+        "plate_number": "MH14EU8899",
+        "body_type": "suv",
+        "colour": "black",
+        "make": "Mahindra",
+        "model": "Thar",
+        "rto_city": "Pimpri-Chinchwad, Maharashtra",
+        "registered_rto": "MH-14 Pimpri-Chinchwad RTO, Maharashtra",
+        "registration_year": 2023,
+        "owner_name": "Siddharth Deshmukh",
+        "synthetic_owner_id": "SYN-OWN-1025",
+        "watchlist_status": "CLEAR",
+        "rto_priors": {"MH14": 0.82, "MH12": 0.10, "KA12": 0.08},
+        "simulated_evidence": VehicleEvidence(
+            track_id=6,
+            consensus_plate="??14EU8899",  # State prefix occluded
+            char_confidences=[0.10, 0.10, 0.98, 0.98, 0.97, 0.98, 0.99, 0.99, 0.99, 0.99],
+            colour="black",
+            colour_conf=0.95,
+            body_type=BodyType.SUV,
+            body_type_conf=0.97,
+            make="Mahindra",
+            make_conf=0.94,
+            model="Thar",
+            model_conf=0.92,
+            rto_priors={"MH14": 0.82, "MH12": 0.10, "KA12": 0.08},
+        ),
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Ready-to-Run Realistic VehicleEvidence Demo Scenarios
 # ---------------------------------------------------------------------------
 
 DEMO_SCENARIOS: Dict[str, DemoScenario] = {
@@ -176,6 +354,72 @@ DEMO_SCENARIOS: Dict[str, DemoScenario] = {
             "Triggers the calibrated 'No Confident Match' gate (no_confident_match=True) "
             "because the observed plate strongly contradicts all registered vehicles."
         ),
+    ),
+    "scenario-5": DemoScenario(
+        id="scenario-5",
+        title="Scenario 5: Silver Sedan Lookalike (GT-3)",
+        description=(
+            "Clean rear capture of a silver sedan with minor dust: 'KA01MJ4096'. "
+            "Vehicle is a Maruti Suzuki Dzire."
+        ),
+        evidence=VehicleEvidence(
+            track_id=5,
+            consensus_plate="KA01MJ4096",
+            char_confidences=[0.99, 0.98, 0.99, 0.97, 0.96, 0.98, 0.99, 0.99, 0.98, 0.99],
+            colour="silver",
+            colour_conf=0.95,
+            body_type=BodyType.CAR,
+            body_type_conf=0.95,
+            make="Maruti Suzuki",
+            make_conf=0.92,
+            model="Dzire",
+            model_conf=0.90,
+            frames_used=[
+                FrameEvidence(
+                    frame_idx=150,
+                    timestamp_sec=5.0,
+                    image_path="outputs/crops/track_005_frame_0150_vehicle.jpg",
+                    plate_crop_path="outputs/crops/track_005_frame_0150_plate.jpg",
+                    ocr_text="KA01MJ4096",
+                    confidence=0.96,
+                )
+            ],
+        ),
+        suggested_known_partial_plate=None,
+        expected_outcome="GT-3 (KA01MJ4096) correctly ranks #1 with high confidence.",
+    ),
+    "scenario-6": DemoScenario(
+        id="scenario-6",
+        title="Scenario 6: Commercial Cargo Truck (GT-5)",
+        description=(
+            "Toll booth surveillance capture of a medium commercial truck: 'TN09BY7104'. "
+            "Vehicle is a blue Tata 407 Gold."
+        ),
+        evidence=VehicleEvidence(
+            track_id=6,
+            consensus_plate="TN09BY7104",
+            char_confidences=[0.97, 0.98, 0.99, 0.96, 0.95, 0.97, 0.99, 0.98, 0.97, 0.98],
+            colour="blue",
+            colour_conf=0.92,
+            body_type=BodyType.TRUCK,
+            body_type_conf=0.94,
+            make="Tata",
+            make_conf=0.90,
+            model="407 Gold",
+            model_conf=0.88,
+            frames_used=[
+                FrameEvidence(
+                    frame_idx=210,
+                    timestamp_sec=7.0,
+                    image_path="outputs/crops/track_006_frame_0210_vehicle.jpg",
+                    plate_crop_path="outputs/crops/track_006_frame_0210_plate.jpg",
+                    ocr_text="TN09BY7104",
+                    confidence=0.94,
+                )
+            ],
+        ),
+        suggested_known_partial_plate=None,
+        expected_outcome="GT-5 (TN09BY7104) ranks #1 as commercial vehicle.",
     ),
 }
 
