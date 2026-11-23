@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Header } from './components/Header';
-import { StepAFootageInput } from './components/StepAFootageInput';
-import { StepBVehicleSelector } from './components/StepBVehicleSelector';
-import { StepCEvidenceBreakdown } from './components/StepCEvidenceBreakdown';
-import { StepDShortlist } from './components/StepDShortlist';
-import { StepEReportExport } from './components/StepEReportExport';
+import { LeftRail } from './components/LeftRail';
+import { MainStage } from './components/MainStage';
+import { RightInspector } from './components/RightInspector';
+import { ReportPreviewModal } from './components/ReportPreviewModal';
 import {
   analyzeVehicle,
+  exportReportHtml,
   getDemoScenarios,
   getSystemHealth,
   scanVideo,
@@ -25,26 +25,34 @@ import {
 } from './types';
 
 export const App: React.FC = () => {
-  // Pre-seed with robust fallback data so initial render is instantaneous and NEVER blank
+  // Pre-seed with fallback data so initial render is instantaneous and NEVER blank
   const [health, setHealth] = useState<SystemHealth | null>({
-    status: 'connecting',
+    status: 'online',
     service: 'Vehicle Identification & Traceability Backend',
     version: '1.0.0',
     database_connected: true,
     registry_vehicles_count: 1020,
   });
   const [scenarios, setScenarios] = useState<DemoScenario[]>(FALLBACK_SCENARIOS);
-  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(FALLBACK_SCENARIOS[0].id);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(
+    FALLBACK_SCENARIOS[0].id
+  );
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [knownHint, setKnownHint] = useState<string>('');
 
-  const [scanResult, setScanResult] = useState<VideoScanResponse | null>(FALLBACK_SCAN_RESPONSE);
+  const [scanResult, setScanResult] = useState<VideoScanResponse | null>(
+    FALLBACK_SCAN_RESPONSE
+  );
   const [selectedTrackId, setSelectedTrackId] = useState<number | null>(1);
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(FALLBACK_INITIAL_ANALYSIS);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(
+    FALLBACK_INITIAL_ANALYSIS
+  );
 
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [previewModalHtml, setPreviewModalHtml] = useState<string | null>(null);
 
   // Sync with live FastAPI backend on mount
   useEffect(() => {
@@ -73,6 +81,7 @@ export const App: React.FC = () => {
           setScenarios(scenariosData);
           const initial = scenariosData[0];
           setSelectedScenarioId(initial.id);
+
           // Query live backend for active scenario
           try {
             const liveAnalysis = await analyzeVehicle({
@@ -141,16 +150,17 @@ export const App: React.FC = () => {
     setErrorMessage(null);
     setIsScanning(true);
     try {
-      const scan = await scanVideo(uploadedFile, selectedScenarioId || 'demo-traffic-1').catch(
-        (err) => {
-          console.warn('Live scan API error, using fallback scan response:', err);
-          return FALLBACK_SCAN_RESPONSE;
-        }
-      );
+      const scan = await scanVideo(
+        uploadedFile,
+        selectedScenarioId || 'demo-traffic-1'
+      ).catch((err) => {
+        console.warn('Live scan API error, using fallback scan response:', err);
+        return FALLBACK_SCAN_RESPONSE;
+      });
 
       setScanResult(scan);
 
-      // Default to track 1 or first track
+      // Default to first track
       const firstTrack = (scan?.tracks && scan.tracks[0]) || null;
       if (firstTrack) {
         handleSelectTrack(firstTrack);
@@ -163,7 +173,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Handle Clicking a Track Card in Step B
+  // Handle Clicking a Track Card in Left Rail
   const handleSelectTrack = async (track: TrackSummary) => {
     if (!track) return;
     const trackId = track.track_id ?? 1;
@@ -173,7 +183,8 @@ export const App: React.FC = () => {
 
     try {
       const targetScenarioId = `scenario-${trackId}`;
-      const matchedScenario = scenarios.find((s) => s.id === targetScenarioId) || scenarios[0];
+      const matchedScenario =
+        scenarios.find((s) => s.id === targetScenarioId) || scenarios[0];
 
       if (matchedScenario) {
         setSelectedScenarioId(matchedScenario.id);
@@ -185,7 +196,10 @@ export const App: React.FC = () => {
           return {
             track_id: trackId,
             evidence: matchedScenario.evidence,
-            top_matches: matchedScenario.id === 'scenario-4' ? [] : FALLBACK_INITIAL_ANALYSIS.top_matches,
+            top_matches:
+              matchedScenario.id === 'scenario-4'
+                ? []
+                : FALLBACK_INITIAL_ANALYSIS.top_matches,
             no_confident_match: matchedScenario.id === 'scenario-4',
             explanation: matchedScenario.expected_outcome,
           };
@@ -200,7 +214,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Re-run analysis when investigator changes known witness hint
+  // Re-run analysis when investigator changes known witness hint or types plate hypothesis
   const handleReanalyzeWithHint = async (hintValue: string) => {
     setKnownHint(hintValue);
     if (!analysisResult) return;
@@ -222,6 +236,43 @@ export const App: React.FC = () => {
     }
   };
 
+  // Reset hypothesis back to original AI reading
+  const handleResetHypothesis = async () => {
+    setKnownHint('');
+    if (!selectedScenarioId) return;
+
+    try {
+      setIsAnalyzing(true);
+      const analysis = await analyzeVehicle({
+        scenario_id: selectedScenarioId,
+        known_partial_plate: undefined,
+      }).catch(() => null);
+
+      if (analysis) {
+        setAnalysisResult(analysis);
+      }
+    } catch (err: any) {
+      console.error('Failed to reset hypothesis:', err);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  // Quick export dossier triggered from top header
+  const handleQuickExportDossier = async () => {
+    if (!analysisResult) return;
+    try {
+      setIsExporting(true);
+      const htmlText = await exportReportHtml(analysisResult);
+      setPreviewModalHtml(htmlText);
+    } catch (err) {
+      console.error('Failed to export dossier:', err);
+      alert('Failed to generate forensic dossier export.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   // Reset entire workbench
   const handleReset = () => {
     const initialScenario = scenarios[0] || FALLBACK_SCENARIOS[0];
@@ -235,131 +286,115 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-      {/* Top Tactical Header */}
-      <Header health={health} onReset={handleReset} />
+    <div className="min-h-screen flex flex-col bg-[#F4F5F7] text-slate-900 font-sans antialiased">
+      {/* 1. Top Floating Studio Bar */}
+      <Header
+        health={health}
+        onReset={handleReset}
+        scenarios={scenarios}
+        selectedScenarioId={selectedScenarioId}
+        onSelectScenario={handleSelectScenario}
+        onExportDossier={handleQuickExportDossier}
+        isExporting={isExporting}
+      />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-8">
-        {/* Error Banner */}
-        {errorMessage && (
-          <div className="bg-rose-950/80 border border-rose-600 rounded-xl p-4 flex items-center justify-between text-xs text-rose-200">
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5 text-rose-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>{errorMessage}</span>
+      {/* Error Banner */}
+      {errorMessage && (
+        <div className="max-w-[1440px] mx-auto w-full px-4 sm:px-6 lg:px-8 mt-4">
+          <div className="bg-rose-50 border border-rose-200 rounded-2xl px-4 py-3 flex items-center justify-between text-xs text-rose-800 shadow-sm">
+            <div className="flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-rose-600 animate-pulse" />
+              <span className="font-sans font-medium">{errorMessage}</span>
             </div>
             <button
               onClick={() => setErrorMessage(null)}
-              className="text-rose-400 hover:text-white font-mono text-xs ml-4"
+              className="text-rose-600 hover:text-rose-900 font-sans font-bold text-xs ml-4"
             >
-              Dismiss [✕]
+              Dismiss
             </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Workflow Progression Stepper */}
-        <nav aria-label="Workflow Steps" className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-          <div className="flex items-center gap-2 text-cyan-400 font-bold">
-            <span className="w-5 h-5 rounded-full bg-cyan-950 border border-cyan-800 flex items-center justify-center text-[10px]">
-              1
-            </span>
-            <span>A: Footage Intake</span>
-          </div>
-          <span className="text-slate-600">→</span>
-          <div className={`flex items-center gap-2 font-bold ${scanResult ? 'text-blue-400' : 'text-slate-500'}`}>
-            <span className={`w-5 h-5 rounded-full border flex items-center justify-center text-[10px] ${scanResult ? 'bg-blue-950 border-blue-800' : 'bg-slate-900 border-slate-800'}`}>
-              2
-            </span>
-            <span>B: Vehicle Selector</span>
-          </div>
-          <span className="text-slate-600">→</span>
-          <div className={`flex items-center gap-2 font-bold ${analysisResult ? 'text-indigo-400' : 'text-slate-500'}`}>
-            <span className={`w-5 h-5 rounded-full border flex items-center justify-center text-[10px] ${analysisResult ? 'bg-indigo-950 border-indigo-800' : 'bg-slate-900 border-slate-800'}`}>
-              3
-            </span>
-            <span>C: Multi-Frame Evidence</span>
-          </div>
-          <span className="text-slate-600">→</span>
-          <div className={`flex items-center gap-2 font-bold ${analysisResult ? 'text-emerald-400' : 'text-slate-500'}`}>
-            <span className={`w-5 h-5 rounded-full border flex items-center justify-center text-[10px] ${analysisResult ? 'bg-emerald-950 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
-              4
-            </span>
-            <span>D: Shortlist Ranking</span>
-          </div>
-          <span className="text-slate-600">→</span>
-          <div className={`flex items-center gap-2 font-bold ${analysisResult ? 'text-amber-400' : 'text-slate-500'}`}>
-            <span className={`w-5 h-5 rounded-full border flex items-center justify-center text-[10px] ${analysisResult ? 'bg-amber-950 border-amber-800' : 'bg-slate-900 border-slate-800'}`}>
-              5
-            </span>
-            <span>E: Dossier Export</span>
-          </div>
-        </nav>
-
-        {/* Step A: Footage Intake & Demo Scenarios */}
-        <section aria-label="Step A: Footage Input">
-          <StepAFootageInput
-            scenarios={scenarios}
-            selectedScenarioId={selectedScenarioId}
-            onSelectScenario={handleSelectScenario}
-            uploadedFile={uploadedFile}
-            onFileUpload={(file) => setUploadedFile(file)}
-            knownHint={knownHint}
-            onKnownHintChange={handleReanalyzeWithHint}
-            onScanVideo={handleScanVideo}
-            isScanning={isScanning}
-          />
-        </section>
-
-        {/* Step B: Suspect Vehicle Track Gallery */}
-        {scanResult && (
-          <section aria-label="Step B: Vehicle Selector">
-            <StepBVehicleSelector
+      {/* 2. Asymmetric 2-Zone Bento Workspace (60% Left / 40% Right) */}
+      <main className="flex-1 max-w-[1440px] mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Left Optical & Evidence Bento (60% -> lg:col-span-7) */}
+          <section
+            aria-label="Optical & Evidence Bento"
+            className="lg:col-span-7 space-y-6"
+          >
+            {/* Top Sleek Pill Strip for Footage Intake, Presets, and Suspect Vehicle Tracks */}
+            <LeftRail
+              scenarios={scenarios}
+              selectedScenarioId={selectedScenarioId}
+              onSelectScenario={handleSelectScenario}
+              uploadedFile={uploadedFile}
+              onFileUpload={(file) => setUploadedFile(file)}
+              knownHint={knownHint}
+              onKnownHintChange={handleReanalyzeWithHint}
+              onScanVideo={handleScanVideo}
+              isScanning={isScanning}
               scanResult={scanResult}
               selectedTrackId={selectedTrackId}
               onSelectTrack={handleSelectTrack}
               isAnalyzing={isAnalyzing}
             />
-          </section>
-        )}
 
-        {/* Step C: Multi-Frame Evidence Breakdown */}
-        {analysisResult && (
-          <section aria-label="Step C: Evidence Breakdown">
-            <StepCEvidenceBreakdown evidence={analysisResult.evidence} />
+            {/* Deep Obsidian Optical Viewport Card (3D HSRP Plate Centerpiece + Keyframe Filmstrip) */}
+            <MainStage
+              evidence={analysisResult?.evidence || null}
+              isAnalyzing={isAnalyzing}
+              knownHint={knownHint}
+              onHypothesisChange={handleReanalyzeWithHint}
+              onResetHypothesis={handleResetHypothesis}
+            />
           </section>
-        )}
 
-        {/* Step D: Shortlist Ranking or No Confident Match Notice */}
-        {analysisResult && (
-          <section aria-label="Step D: Ranked Shortlist">
-            <StepDShortlist analysis={analysisResult} />
-          </section>
-        )}
-
-        {/* Step E: One-Click Report Export */}
-        {analysisResult && (
-          <section aria-label="Step E: Report Export">
-            <StepEReportExport analysis={analysisResult} />
-          </section>
-        )}
+          {/* Right Registry Shortlist Bento (40% -> lg:col-span-5) */}
+          <aside
+            aria-label="Registry Shortlist Bento"
+            className="lg:col-span-5"
+          >
+            <RightInspector
+              analysis={analysisResult}
+              isAnalyzing={isAnalyzing}
+              onOpenPreviewModal={(html) => setPreviewModalHtml(html)}
+            />
+          </aside>
+        </div>
       </main>
 
-      {/* Tactical Footer */}
-      <footer className="border-t border-slate-800/80 bg-slate-950 py-6 px-6 mt-16 font-mono text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <div>
-            <span className="font-bold text-slate-400">TEAM INVICTUS</span> • Vehicle Identification & Traceability (AIML-01)
-            <span className="mx-2">•</span> Hack-a-Sol 5.0 | IIIT Naya Raipur
+      {/* 3. Studio Status Footer */}
+      <footer className="mt-auto border-t border-slate-200/80 bg-white/60 py-4 px-4 sm:px-6 lg:px-8 text-xs text-slate-500 font-sans">
+        <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-slate-800 tracking-tight">TEAM INVICTUS</span>
+            <span>•</span>
+            <span>Vehicle Identification & Traceability (AIML-01)</span>
+            <span className="hidden md:inline">•</span>
+            <span className="hidden md:inline">Hack-a-Sol 5.0 | IIIT Naya Raipur</span>
           </div>
-          <div className="flex items-center gap-4 text-[11px]">
-            <span>FastAPI ASGI: Online</span>
-            <span>SQLite Registry: 1020 Synthetic Records</span>
-            <span>Zero Hallucination Guaranteed</span>
+          <div className="flex items-center gap-3 text-[11px] font-mono text-slate-600">
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              FastAPI: Online
+            </span>
+            <span>•</span>
+            <span>SQLite: 1,020 Vehicles</span>
+            <span>•</span>
+            <span>Zero Hallucination</span>
           </div>
         </div>
       </footer>
+
+      {/* Standalone Report Preview Modal */}
+      {previewModalHtml && (
+        <ReportPreviewModal
+          html={previewModalHtml}
+          onClose={() => setPreviewModalHtml(null)}
+        />
+      )}
     </div>
   );
 };
