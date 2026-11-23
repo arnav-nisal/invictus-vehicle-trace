@@ -227,6 +227,30 @@ class VehicleEvidence(BaseModel):
         description="Confidence score (0.0 - 1.0) of the body type classification.",
         examples=[0.96],
     )
+    make: str = Field(
+        default="Unknown",
+        description="Predicted vehicle manufacturer or company (e.g. Honda, Tata, Maruti Suzuki, Bajaj).",
+        examples=["Honda", "Tata", "Unknown"],
+    )
+    make_conf: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score (0.0 - 1.0) of the make/company prediction.",
+        examples=[0.92, 0.0],
+    )
+    model: str = Field(
+        default="Unknown",
+        description="Predicted vehicle model name (e.g. Activa 6G, Nexon, Swift, Dzire).",
+        examples=["Activa 6G", "Nexon", "Unknown"],
+    )
+    model_conf: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score (0.0 - 1.0) of the model prediction.",
+        examples=[0.89, 0.0],
+    )
     frames_used: List[FrameEvidence] = Field(
         default_factory=list,
         description="List of best per-frame crops and OCR predictions used for consensus.",

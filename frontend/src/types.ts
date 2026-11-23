@@ -38,6 +38,10 @@ export interface VehicleEvidence {
   colour_conf: number;
   body_type: BodyType;
   body_type_conf: number;
+  make?: string;
+  make_conf?: number;
+  model?: string;
+  model_conf?: number;
   frames_used: FrameEvidence[];
 }
 

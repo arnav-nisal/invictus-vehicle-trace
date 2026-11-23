@@ -291,12 +291,20 @@ def get_vehicle_evidence_for_track(
         if full_crop_path.exists():
             crop_img = cv2.imread(str(full_crop_path))
 
-    # Determine colour
-    dominant_colour, colour_conf = extract_dominant_colour(crop_img)
+    # Determine colour and body type via attribute extractor (Gemini multimodal or local fallback)
+    from backend.attribute_extractor import extract_vehicle_attributes
 
-    # Determine body type
     class_name = tracks_meta_entry.get("class_name") or tracks_meta_entry.get("category", "car")
-    body_type, body_conf = map_class_to_body_type(class_name)
+    attrs = extract_vehicle_attributes(
+        images=[crop_img] if crop_img is not None else [],
+        coarse_class=class_name,
+        track_id=track_id,
+    )
+
+    try:
+        body_type_enum = BodyType(attrs.body_type)
+    except Exception:
+        body_type_enum = BodyType.CAR
 
     # Run OCR with ? wildcards
     best_frame = tracks_meta_entry.get("best_frame", 42) or 42
@@ -313,10 +321,14 @@ def get_vehicle_evidence_for_track(
         track_id=track_id,
         consensus_plate=plate_text,
         char_confidences=char_confs,
-        colour=dominant_colour,
-        colour_conf=colour_conf,
-        body_type=body_type,
-        body_type_conf=body_conf,
+        colour=attrs.colour,
+        colour_conf=attrs.colour_conf,
+        body_type=body_type_enum,
+        body_type_conf=attrs.body_type_conf,
+        make=attrs.make,
+        make_conf=attrs.make_conf,
+        model=attrs.model,
+        model_conf=attrs.model_conf,
         frames_used=frames_used,
     )
 

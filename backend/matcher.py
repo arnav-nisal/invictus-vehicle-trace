@@ -292,6 +292,72 @@ def score_body_type(observed_body: BodyType, candidate_body: str) -> Tuple[float
     return 0.0, reasons
 
 
+def score_make_model(
+    evidence: VehicleEvidence,
+    candidate: RegistryVehicle,
+) -> Tuple[float, List[str], bool]:
+    """Score fuzzy similarity between detected company/model and candidate vehicle.
+
+    Returns:
+        (make_model_score, reasons, has_active_make_model)
+    Gracefully gives 0.0 with neutral weight when detected make/model is 'Unknown'.
+    """
+    obs_make = (getattr(evidence, "make", None) or "Unknown").strip()
+    obs_model = (getattr(evidence, "model", None) or "Unknown").strip()
+    make_conf = getattr(evidence, "make_conf", 0.0) or 0.0
+    model_conf = getattr(evidence, "model_conf", 0.0) or 0.0
+
+    cand_make = (candidate.make or "").strip()
+    cand_model = (candidate.model or "").strip()
+
+    reasons: List[str] = []
+
+    has_make = bool(obs_make.lower() not in ("unknown", "none", "") and make_conf >= 0.20)
+    has_model = bool(obs_model.lower() not in ("unknown", "none", "") and model_conf >= 0.20)
+
+    if not has_make and not has_model:
+        return 0.0, reasons, False
+
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    nm_obs_make = norm(obs_make)
+    nm_cand_make = norm(cand_make)
+    nm_obs_model = norm(obs_model)
+    nm_cand_model = norm(cand_model)
+
+    make_score = 0.0
+    if has_make:
+        if nm_obs_make == nm_cand_make:
+            make_score = 1.0
+            reasons.append(f"Company/Make match: observed manufacturer '{obs_make}' matches registered '{cand_make}'.")
+        elif nm_obs_make in nm_cand_make or nm_cand_make in nm_obs_make:
+            make_score = 0.85
+            reasons.append(f"Company/Make similarity: observed manufacturer '{obs_make}' closely aligns with registered '{cand_make}'.")
+        else:
+            make_score = 0.0
+
+    model_score = 0.0
+    if has_model:
+        if nm_obs_model == nm_cand_model:
+            model_score = 1.0
+            reasons.append(f"Model match: observed vehicle model '{obs_model}' matches registered '{cand_model}'.")
+        elif nm_obs_model in nm_cand_model or nm_cand_model in nm_obs_model:
+            model_score = 0.80
+            reasons.append(f"Model family match: observed vehicle model '{obs_model}' closely shares series with registered '{cand_model}'.")
+        else:
+            model_score = 0.0
+
+    if has_make and has_model:
+        score = (make_score * 0.5 + model_score * 0.5)
+    elif has_make:
+        score = make_score
+    else:
+        score = model_score
+
+    return round(score, 4), reasons, True
+
+
 def score_candidate(
     evidence: VehicleEvidence,
     candidate: RegistryVehicle,
@@ -316,7 +382,10 @@ def score_candidate(
     # 4. Score Body Type
     body_score, body_reasons = score_body_type(evidence.body_type, candidate.body_type)
 
-    # 5. Adaptive Weights:
+    # 5. Score Make & Model (Company & Model)
+    make_model_score, mm_reasons, has_active_mm = score_make_model(evidence, candidate)
+
+    # 6. Adaptive Weights:
     # Dynamically shift weight toward colour and body type when 3 or fewer plate characters are legible
     legible_chars = sum(1 for ch in merged_plate if ch != "?")
     if legible_chars <= 3:
@@ -328,9 +397,6 @@ def score_candidate(
         w_colour = 0.20
         w_body = 0.15
 
-    # Secondary make/model heuristic score (0.0 if not matched or unknown)
-    make_model_score = 0.0
-
     # Calculate composite score incorporating detector confidences
     # Attributes are scaled by detection confidence
     c_conf = evidence.colour_conf
@@ -339,15 +405,26 @@ def score_candidate(
     effective_colour = colour_score * (0.80 + 0.20 * c_conf)
     effective_body = body_score * (0.80 + 0.20 * b_conf)
 
-    composite = (
+    base_composite = (
         w_plate * plate_score
         + w_colour * effective_colour
         + w_body * effective_body
     )
+
+    if has_active_mm:
+        # Confidence-scaled active weight for make and model (up to 10% composite weight)
+        mm_conf = max(getattr(evidence, "make_conf", 0.0), getattr(evidence, "model_conf", 0.0))
+        w_mm = min(0.12, 0.10 * mm_conf)
+        effective_mm = make_model_score * (0.80 + 0.20 * mm_conf)
+        composite = (1.0 - w_mm) * base_composite + w_mm * effective_mm
+    else:
+        # Gracefully neutral weight when make/model is Unknown
+        composite = base_composite
+
     composite_score = round(min(1.0, max(0.0, composite)), 4)
 
     # Aggregate match reasons
-    all_reasons = plate_reasons + body_reasons + colour_reasons
+    all_reasons = plate_reasons + body_reasons + colour_reasons + mm_reasons
 
     score_breakdown = ScoreBreakdown(
         plate_score=plate_score,

@@ -269,6 +269,10 @@ def generate_forensic_html_report(
 
     colour_conf_pct = f"{evidence.colour_conf * 100:.1f}%"
     body_conf_pct = f"{evidence.body_type_conf * 100:.1f}%"
+    obs_make = getattr(evidence, "make", "Unknown") or "Unknown"
+    obs_model = getattr(evidence, "model", "Unknown") or "Unknown"
+    make_conf_pct = f"{getattr(evidence, 'make_conf', 0.0) * 100:.1f}%" if obs_make.lower() != "unknown" else "N/A"
+    model_conf_pct = f"{getattr(evidence, 'model_conf', 0.0) * 100:.1f}%" if obs_model.lower() != "unknown" else "N/A"
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -505,7 +509,7 @@ def generate_forensic_html_report(
 
     .target-attributes-grid {{
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
       gap: 16px;
       margin-top: 16px;
       padding-top: 16px;
@@ -909,6 +913,16 @@ def generate_forensic_html_report(
             <div class="attr-label">Body Classification</div>
             <div class="attr-val">{html.escape(evidence.body_type.value.capitalize())}</div>
             <div class="attr-conf">Conf: {body_conf_pct}</div>
+          </div>
+          <div class="attr-box">
+            <div class="attr-label">Company / Make</div>
+            <div class="attr-val">{html.escape(obs_make)}</div>
+            <div class="attr-conf">Conf: {make_conf_pct}</div>
+          </div>
+          <div class="attr-box">
+            <div class="attr-label">Vehicle Model</div>
+            <div class="attr-val">{html.escape(obs_model)}</div>
+            <div class="attr-conf">Conf: {model_conf_pct}</div>
           </div>
           <div class="attr-box">
             <div class="attr-label">Keyframes Processed</div>

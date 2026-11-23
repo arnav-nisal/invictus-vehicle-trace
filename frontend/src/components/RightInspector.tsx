@@ -258,6 +258,32 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         </div>
       )}
 
+      {/* 2b. Target Vehicle Evidence Badges */}
+      <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-3 flex flex-wrap items-center gap-2 text-xs font-sans">
+        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Target Evidence:</span>
+        <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 font-mono font-bold text-slate-800">
+          {observedPlate || 'MH12??1432'}
+        </span>
+        <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-700 capitalize font-medium">
+          {analysis.evidence?.colour || 'white'}
+        </span>
+        <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-700 uppercase font-medium">
+          {analysis.evidence?.body_type || 'vehicle'}
+        </span>
+        {analysis.evidence?.make && analysis.evidence.make.toLowerCase() !== 'unknown' && (
+          <span className="px-2.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 font-semibold flex items-center gap-1">
+            <span className="text-[10px] text-indigo-400 font-normal">Make:</span>
+            {analysis.evidence.make}
+          </span>
+        )}
+        {analysis.evidence?.model && analysis.evidence.model.toLowerCase() !== 'unknown' && (
+          <span className="px-2.5 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-700 font-semibold flex items-center gap-1">
+            <span className="text-[10px] text-amber-500 font-normal">Model:</span>
+            {analysis.evidence.model}
+          </span>
+        )}
+      </div>
+
       {/* 3. Character Alignment Diff Legend */}
       <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-2xl bg-slate-50 border border-slate-200/80 text-[11px] font-sans">
         <span className="text-slate-500 font-semibold mr-1">Diff Alignment:</span>

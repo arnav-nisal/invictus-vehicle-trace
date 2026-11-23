@@ -13,6 +13,10 @@ export const FALLBACK_SCENARIOS: DemoScenario[] = [
       colour_conf: 0.94,
       body_type: 'two-wheeler',
       body_type_conf: 0.96,
+      make: 'Honda',
+      make_conf: 0.92,
+      model: 'Activa 6G',
+      model_conf: 0.90,
       frames_used: [
         {
           frame_idx: 42,
@@ -47,6 +51,10 @@ export const FALLBACK_SCENARIOS: DemoScenario[] = [
       colour_conf: 0.95,
       body_type: 'suv',
       body_type_conf: 0.96,
+      make: 'Tata',
+      make_conf: 0.94,
+      model: 'Nexon',
+      model_conf: 0.91,
       frames_used: [
         {
           frame_idx: 88,
@@ -73,6 +81,10 @@ export const FALLBACK_SCENARIOS: DemoScenario[] = [
       colour_conf: 0.93,
       body_type: 'auto-rickshaw',
       body_type_conf: 0.97,
+      make: 'Bajaj',
+      make_conf: 0.95,
+      model: 'Compact 4S',
+      model_conf: 0.90,
       frames_used: [
         {
           frame_idx: 15,
@@ -99,6 +111,10 @@ export const FALLBACK_SCENARIOS: DemoScenario[] = [
       colour_conf: 0.91,
       body_type: 'car',
       body_type_conf: 0.94,
+      make: 'Unknown',
+      make_conf: 0.0,
+      model: 'Unknown',
+      model_conf: 0.0,
       frames_used: [
         {
           frame_idx: 110,
