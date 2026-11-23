@@ -93,6 +93,18 @@ flowchart TD
   - **Border-Truncation Guard**: Rejects frame-exit and edge-clipped plates ($\le 2$ native px from crop border, $\le 6$ px from video outer frame, or AR drop $< 0.75 \times \text{median\_ar}$ near borders), preventing cut-off exit frames from dominating selection.
   - **Pure Lanczos4 Enlargement**: Scales small plates cleanly to $\ge 320\text{w}$ or $\ge 120\text{h}$ with zero post-processing filters, preserving exact dimensional parity between unenhanced and enhanced crops.
   - **Outlier-Resilient Dynamic Gate**: Replaces peak anchors with a $p90$ score anchor ($0.45 \times p90$), preventing single glare frames from starving OCR of readable candidates.
+- **Stage 2.3: Dual-Pipeline Cross-Checked OCR & 3-Bucket Slot Arbitration (`ocr_engine.py`)**:
+  - **Architectural Diversity & Zero Cloud Cost**: Deploys two open-source local engines: **RapidOCR** (PP-OCRv6 detector + PP-OCRv5 English recognizer via ONNX Runtime) and **PARSeq** (`baudm/parseq` on CUDA 12.4 PyTorch). Evaluated and specifically rejected `fast-plate-ocr` because its 9-character fixed maximum sequence length truncates standard 10-character Indian plates (`SS DD LL DDDD`).
+  - **Dual Parallel Complementary Streams**:
+    - *Pipeline A (Unenhanced stream)*: RapidOCR primary + PARSeq cross-check.
+    - *Pipeline B (Enhanced stream)*: PARSeq primary + RapidOCR cross-check.
+  - **Two-Line Indian Scooter/Auto Plate Support**: RapidOCR row clustering by vertical center; plates with $\text{AR} < 2.2$ automatically split into upper ($0\text{--}58\%$) and lower ($42\text{--}100\%$) reading strips for both engines.
+  - **Anti-Hallucination 3-Bucket Arbitration**:
+    - **LOCKED** ($\ge 0.65$ combined conf, agreement, $\ge 2$ supporting frames): Sent to Stage 2.4 VLM for blind triple-check.
+    - **CONTRADICTORY** (disagreement or confidence in $[0.38, 0.65)$): Sent to Stage 2.4 VLM for targeted tie-breaking.
+    - **UNREADABLE** (confidence $< 0.38$ or $<15\%$ frame coverage): Emits `'?'`; VLM is explicitly forbidden from hallucinating guesses (`FORBIDDEN_KEEP_UNKNOWN`).
+  - **Calibrated Multi-Frame Confidence**: Computes candidate slot confidence as $\text{effective\_conf} = \text{vote\_share} \times \text{mean\_char\_conf}$, preventing unanimous blurry character reads from falsely masquerading as LOCKED.
+  - **Stage 2.4 VLM Evidence Pack**: Packages top 4 highest-weight distinct frame crops with verified disk paths into `vlm_evidence_pack`.
 
 ### 2. Probabilistic Matching Engine (`backend/matcher.py`)
 - **Weighted Multi-Factor Scoring**:
@@ -153,7 +165,15 @@ python scripts/run_tracking.py --video data/clips/activa_signal.mp4 --output-dir
 python scripts/run_tracking.py --video data/clips/activa_signal.mp4 --reuse-tracking --target-id 27
 python scripts/run_tracking.py --video data/clips/simple_traffic_30s.mp4 --crop-video data/clips/simple_traffic.mp4 --reuse-tracking --target-id 2
 
-# 5. Run on highway traffic with custom trajectory & lateral alignment thresholds
+# 5. Run Stage 2.3 Standalone OCR Arbitration
+python scripts/run_ocr.py --plate-manifest outputs/activa_signal/track_027/plate_manifest.json
+python scripts/run_ocr.py --plate-manifest outputs/simple_traffic_30s/track_002/plate_manifest.json
+
+# 6. Run Stage 2.4 Standalone Blind VLM Verification & Arbitration
+python scripts/run_vlm.py --track-dir outputs/activa_signal/track_027 --provider auto
+python scripts/run_vlm.py --track-dir outputs/simple_traffic_30s/track_002 --provider auto
+
+# 7. Run on highway traffic with custom trajectory & lateral alignment thresholds
 python scripts/run_tracking.py \
   --video data/clips/highway_traffic.mp4 \
   --output-dir outputs/highway_traffic \
@@ -165,7 +185,16 @@ python scripts/run_tracking.py \
   --max-lateral-err 65.0
 ```
 
-### 3. Running the FastAPI Backend
+### 3. Running the Verification Test Suite
+```bash
+# Run unit tests for OCR arbitration and VLM verification
+pytest tests/test_ocr_arbitration.py tests/test_vlm_verifier.py -v
+
+# Run comprehensive verification tests on matcher, scoring, and API endpoints
+python scripts/test_matcher.py
+```
+
+### 4. Running the FastAPI Backend
 ```bash
 # Seed the synthetic RTO database (if needed)
 python -m backend.seed_data
@@ -175,22 +204,13 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 API Documentation will be live at `http://localhost:8000/docs`.
 
-### 4. Running the Frontend Dashboard
+### 5. Running the Frontend Dashboard
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 Dashboard will be accessible at `http://localhost:5173`.
-
-### 5. Running the Verification Test Suite
-```bash
-# Run comprehensive verification tests on matcher, scoring, and API endpoints
-python scripts/test_matcher.py
-
-# Build production frontend
-cd frontend && npm run build
-```
 
 ---
 

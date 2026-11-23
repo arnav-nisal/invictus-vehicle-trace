@@ -141,7 +141,7 @@ def parse_args():
         "--padding",
         type=float,
         default=0.08,
-        help="Safety margin padding percentage around bounding box for vehicle crops (default: 0.08 = 8%)",
+        help="Safety margin padding percentage around bounding box for vehicle crops (default: 0.08 = 8%%)",
     )
     parser.add_argument(
         "--crop-video",
@@ -154,6 +154,25 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Run Stage 2.2 Dual-Detector license plate cropping & dynamic readability selection (default: True)",
+    )
+    parser.add_argument(
+        "--skip-ocr",
+        action="store_true",
+        default=False,
+        help="Skip Stage 2.3 OCR (useful when only re-running plate detection, default: False)",
+    )
+    parser.add_argument(
+        "--skip-vlm",
+        action="store_true",
+        default=False,
+        help="Skip Stage 2.4 Blind VLM verification (default: False)",
+    )
+    parser.add_argument(
+        "--vlm-provider",
+        type=str,
+        default="auto",
+        choices=["auto", "groq", "nvidia", "ollama"],
+        help="VLM provider for Stage 2.4 (default: auto)",
     )
     return parser.parse_args()
 
@@ -311,6 +330,56 @@ def main():
                         crop_manifest_path=crop_manifest_path,
                         device=args.device,
                     )
+
+            # Stage 2.3: Dual-Pipeline OCR & 3-Bucket Arbitration
+            track_dir = Path(raw_dir_str).parent if raw_dir_str else None
+            if not args.skip_ocr:
+                plate_manifest_path = track_dir / "plate_manifest.json" if track_dir else None
+                if plate_manifest_path and plate_manifest_path.exists():
+                    print("\n" + "=" * 80)
+                    print("  STAGE 2.3 — DUAL-PIPELINE OCR & SLOT ARBITRATION")
+                    print("=" * 80)
+                    try:
+                        from cv_pipeline.ocr_engine import run_ocr_track
+                        import json as _json
+                        ocr_result = run_ocr_track(str(plate_manifest_path), device=args.device)
+                        ocr_out = track_dir / "ocr_result.json"
+                        with open(ocr_out, "w") as _f:
+                            _json.dump(ocr_result, _f, indent=2)
+                        print(f"  Recovered plate : {ocr_result['recovered_plate']}")
+                        print(f"  Overall conf    : {ocr_result['overall_confidence']:.4f}")
+                        print(f"  State valid     : {ocr_result['state_code_valid']}")
+                        ss = ocr_result["slot_summary"]
+                        print(f"  Slots  LOCKED={ss['locked']}  CONTRADICTORY={ss['contradictory']}  UNREADABLE={ss['unreadable']}")
+                        print(f"  Runtime         : {ocr_result['runtime_seconds']:.1f}s")
+                        print(f"  OCR result      : {ocr_out}")
+                    except Exception as _exc:
+                        print(f"[ERROR] Stage 2.3 OCR failed: {_exc}")
+                        import traceback; traceback.print_exc()
+            else:
+                print("[INFO] --skip-ocr: Stage 2.3 skipped.")
+
+            # Stage 2.4: Blind Multi-Tier VLM Triple-Check & Tie-Breaker
+            if not args.skip_vlm:
+                ocr_out = track_dir / "ocr_result.json" if track_dir else None
+                if ocr_out and ocr_out.exists():
+                    print("\n" + "=" * 80)
+                    print("  STAGE 2.4 — BLIND MULTI-TIER VLM VERIFICATION & ARBITRATION")
+                    print("=" * 80)
+                    try:
+                        from cv_pipeline.vlm_verifier import verify_track_vlm
+                        vlm_result = verify_track_vlm(track_dir=track_dir, provider=args.vlm_provider)
+                        print(f"  VLM Status      : {vlm_result.get('vlm_status')}")
+                        print(f"  Provider Used   : {vlm_result.get('provider_used')} ({vlm_result.get('model_used')})")
+                        print(f"  Stage 2.3 Plate : {vlm_result.get('stage_2_3_plate')}")
+                        print(f"  VLM Raw Plate   : {vlm_result.get('vlm_raw_plate')}")
+                        print(f"  FINAL RECONCILED: {vlm_result.get('reconciled_plate')} (Valid State: {vlm_result.get('state_code_valid')})")
+                        print(f"  Runtime         : {vlm_result.get('runtime_seconds'):.2f}s")
+                    except Exception as _exc:
+                        print(f"[ERROR] Stage 2.4 VLM failed: {_exc}")
+                        import traceback; traceback.print_exc()
+            else:
+                print("[INFO] --skip-vlm: Stage 2.4 skipped.")
 
 
 if __name__ == "__main__":

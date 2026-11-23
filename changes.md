@@ -215,3 +215,81 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
     - Border-Truncated Rejected: 8 frames (Frame 187 clipped by bottom video edge cleanly rejected).
     - Last Selected Frame: **Frame 186** ($130\times 37$ raw enlarged $2.46\times$ to $320\times 91$), with plate 100% fully intact.
     - p90 Readability Score: 1923.6 | Threshold: 865.6 | Selected for OCR: 52 frames.
+
+---
+
+## [2026-11-24] — Stage 2.3: Dual-Pipeline Cross-Checked OCR & 3-Bucket Slot Arbitration
+
+### 2026-11-24 01:50:00 IST — Stage 2.3 OCR Engine Implementation (`cv_pipeline/ocr_engine.py`, `scripts/run_ocr.py`)
+- **1. Dual Local Open-Source OCR Engine Integration**:
+  - Implemented local dual OCR architecture using **RapidOCR** (PP-OCRv6 DBNet detection + PP-OCRv5 English text recognition via ONNX Runtime) and **PARSeq** (`baudm/parseq`, PyTorch CUDA 12.4 on NVIDIA RTX 3050).
+  - Explicitly evaluated and rejected `fast-plate-ocr` due to its hardcoded 9-character output sequence ceiling, which breaks standard 10-character Indian license plates (`SS DD LL DDDD`).
+  - Implemented empty-detection recognition fallback and two-line Indian plate splitting (plates with aspect ratio $< 2.2$ split into top $0\text{--}58\%$ and bottom $42\text{--}100\%$ strips).
+- **2. Dual Parallel Complementary Streams**:
+  - **Pipeline A (Unenhanced)**: RapidOCR primary + PARSeq cross-check on natural crops (`plate_crops_selected/unenhanced/`).
+  - **Pipeline B (Enhanced)**: PARSeq primary + RapidOCR cross-check on contrast-controlled crops (`plate_crops_selected/enhanced/`).
+- **3. Anti-Hallucination 3-Bucket Slot Arbitration**:
+  - **LOCKED**: Both pipelines agree on character candidate with effective combined confidence $\ge 0.65$ across $\ge 2$ supporting frames (or 1 frame with $\ge 0.85$); marked with `vlm_action: "TRIPLE_CHECK"`.
+  - **CONTRADICTORY**: Pipeline disagreement or confidence in $[0.38, 0.65)$; marked with `vlm_action: "TIE_BREAK"`.
+  - **UNREADABLE**: Combined confidence $< 0.38$ or frame coverage $< 15\%$; emits `'?'` and strictly forbids VLM guessing (`vlm_action: "FORBIDDEN_KEEP_UNKNOWN"`).
+- **4. Calibrated Multi-Frame Confidence Bugfix**:
+  - Fixed confidence accounting bug where vote share alone normalized unanimous blurry single-frame reads into false $1.0$ confidence.
+  - Tracked both weighted vote share (`vote_share`) and weighted mean character confidence (`mean_char_conf`) per slot, computing $\text{effective\_conf} = \text{vote\_share} \times \text{mean\_char\_conf}$.
+  - Confirmed via unit tests that unanimous mid-confidence reads ($\sim 0.50$) land in `CONTRADICTORY` and unanimous low-confidence reads ($\sim 0.25$) land in `UNREADABLE ('?')`.
+- **5. Stage 2.4 VLM Evidence Pack Packaging**:
+  - Automatically isolates and packages the top 4 highest-weight distinct frame plate crops with verified on-disk paths into `vlm_evidence_pack` inside `ocr_result.json`.
+- **6. Verification Results**:
+  - **Unit Test Suite (`tests/test_ocr_arbitration.py`)**: 40/40 tests passing ($100\%$).
+  - **Track 27 (`activa_signal.mp4`, 26 selected frames)**:
+    - Recovered plate: **`UP15BE5580`** (Uttar Pradesh, 10-char template).
+    - State code valid: **True** (`UP`).
+    - Overall confidence: **$0.6989$**.
+    - Slots: **7 LOCKED**, **3 CONTRADICTORY**, **0 UNREADABLE**.
+    - Top raw frame read: Frame 253 (`UP15BE5580`, weight $1.3856$).
+    - Runtime: **$13.1\text{s}$** on RTX 3050 GPU.
+  - **Track 2 (`simple_traffic_30s.mp4`, 52 selected frames)**:
+    - Recovered plate: **`????BG718?`** (10-char template, core series and sequence identified).
+    - Overall confidence: **$0.4274$**.
+    - Slots: **0 LOCKED**, **5 CONTRADICTORY**, **5 UNREADABLE**.
+    - Top raw frame read: Frame 184 (`KH01BG7182`, weight $1.1894$) / Frame 182 (`MH01BG7184`, weight $1.1888$).
+    - Runtime: **$17.5\text{s}$** on RTX 3050 GPU.
+
+---
+
+### 2026-11-24 03:00:00 IST — Stage 2.4: Blind Multi-Tier VLM Triple-Check & Tie-Breaker (`cv_pipeline/vlm_verifier.py`, `scripts/run_vlm.py`)
+- **1. 3-Tier Zero-Paid-API OpenAI-Compatible Fallback Architecture**:
+  - Implemented 3-tier fallback chain via standard `openai` Python SDK:
+    - **Tier 1 (Groq)**: `qwen/qwen3.8-27b`, low reasoning effort, hidden reasoning format, strict JSON response format, `max_tokens=600` for output token rate limit protection.
+    - **Tier 2 (NVIDIA Build NIM)**: `nvidia/nemotron-3.5-super-vl-120b-a12b`, instruct mode (`enable_thinking: False`), zero-temperature JSON extraction, `max_tokens=600`.
+    - **Tier 3 (Local Ollama)**: `qwen3-vl:4b-instruct` / `qwen3-vl:2b-instruct` for offline air-gapped environments.
+  - Robust fallback tracing: each tier's attempt, latency, status (`SUCCESS`, `FAILED`, `SKIPPED`), and error details recorded in `vlm_result.json`.
+  - Graceful degradation: if all tiers fail or API keys are missing, falls back cleanly to Stage 2.3 OCR arbitration (`vlm_status: "FALLBACK_TO_OCR"`).
+- **2. 2x2 Labeled Evidence Grid Synthesis**:
+  - `build_evidence_grids`: Takes top 4 distinct frames from `vlm_evidence_pack`.
+  - Synthesizes two 2x2 labeled stitched composite grids (`vlm_evidence_unenhanced_grid.png` and `vlm_evidence_enhanced_grid.png` at 640x240px) with per-cell headers displaying Frame Index, Readability Score, and Weight.
+  - Sends exactly 2 images in the multimodal payload, preventing rate limits and token bloat.
+- **3. Blind Verification Protocol (Zero OCR Text Leakage)**:
+  - System and user prompts strictly withhold Stage 2.3 OCR string to eliminate confirmation bias.
+  - VLM evaluates layout (`single_line` vs `two_line`) and extracts slot-by-slot characters, confidences, and legibility booleans.
+- **4. Slot-by-Slot 3-Bucket Reconciliation**:
+  - **LOCKED Slots**: VLM acts as triple-check (`TRIPLE_CHECK_CONFIRMED`). Preserves OCR unless VLM shows $\ge 0.90$ certainty visual disagreement (`VLM_OVERRIDE_LOCKED`).
+  - **CONTRADICTORY Slots**: VLM breaks tie between Pipe A and Pipe B (`TIE_BREAK_PIPE_A` / `TIE_BREAK_PIPE_B`), or selects independent candidate on $\ge 0.70$ confidence (`VLM_INDEPENDENT_CHOICE`).
+  - **UNREADABLE Slots**: Anti-hallucination guard (`FORBIDDEN_KEEP_UNKNOWN`) preserves `'?'` unless VLM detects crisp character with $\ge 0.85$ confidence (`VLM_RESOLVED_UNREADABLE`).
+- **5. Standalone CLI & Pipeline Integration**:
+  - Created standalone CLI `scripts/run_vlm.py` with tabular visualization of slot reconciliation.
+  - Integrated into `scripts/run_tracking.py` with `--skip-vlm` and `--vlm-provider auto|groq|nvidia|ollama`.
+  - Fixed `argparse` literal `%` interpolation bug in `scripts/run_tracking.py`.
+- **6. Verification Results**:
+  - **Unit Tests (`tests/test_vlm_verifier.py`)**: 6/6 tests passing. Total test suite: 46/46 tests passing ($100\%$).
+  - **Track 27 (`activa_signal/track_027`)**:
+    - Provider: Groq (`qwen/qwen3.8-27b`) in 3.61s.
+    - Layout: `two_line`.
+    - Stage 2.3 OCR: `UP15BE5580` $\to$ VLM: `UP15BE5580` $\to$ **Reconciled: `UP15BE5580`** (Valid State Code: `UP` = Uttar Pradesh).
+    - Actions: 7 `TRIPLE_CHECK_CONFIRMED`, 3 `TIE_BREAK_PIPE_A`.
+  - **Track 2 (`simple_traffic_30s/track_002`)**:
+    - Tier 1 Groq hit OTPM rate limit; seamless automatic failover to Tier 2 NVIDIA NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`) in 5.58s.
+    - Layout: `single_line`.
+    - Stage 2.3 OCR: `????BG718?` (5 unreadable, 5 contradictory).
+    - VLM resolved unreadable state and district code `HR01` and trailing digit `4`.
+    - **Reconciled: `HR01BC7184`** (Valid State Code: `HR` = Haryana).
+    - Actions: 5 `VLM_RESOLVED_UNREADABLE`, 4 `TIE_BREAK_PIPE_A`, 1 `VLM_INDEPENDENT_CHOICE`.
