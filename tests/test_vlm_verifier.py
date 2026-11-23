@@ -114,10 +114,10 @@ def test_json_payload_extraction():
 
 
 def test_reconciliation_locked_slots(dummy_track_env):
-    """Test LOCKED slot triple-check confirmation vs high-certainty override."""
+    """Test LOCKED slot triple-check confirmation and protection from single-VLM override."""
     _, _, mock_ocr = dummy_track_env
 
-    # VLM agrees with OCR on slot 0 ("U") and disagrees with low confidence on slot 1 ("P")
+    # VLM agrees with OCR on slot 0 ("U") and disagrees on slot 1 ("P")
     vlm_output = {
         "plate_text": "UR15BE5580",
         "plate_layout": "single_line",
@@ -134,25 +134,27 @@ def test_reconciliation_locked_slots(dummy_track_env):
     assert slots[0]["final_char"] == "U"
     assert slots[0]["action"] == "TRIPLE_CHECK_CONFIRMED"
 
-    # Slot 1: VLM disagreed ("R") but confidence only 0.60 -> locked OCR held
+    # Slot 1: VLM disagreed ("R") -> locked OCR held firm, disputed tag with penalty
     assert slots[1]["final_char"] == "P"
-    assert slots[1]["action"] == "LOCKED_PRESERVED_OVER_VLM"
+    assert slots[1]["action"] == "LOCKED_VLM_DISPUTED"
+    assert slots[1]["confidence_penalty"] == -0.05
 
-    # High certainty override test (confidence >= 0.90)
-    vlm_override = {
-        "plate_text": "UP15BE5580",
+    # High certainty disagreement (confidence >= 0.90) still does NOT override 2-OCR consensus
+    vlm_dispute_high = {
+        "plate_text": "UB15BE5580",
         "slot_reads": [
-            {"slot_idx": 1, "char": "B", "confidence": 0.94, "legible": True, "note": "unmistakable B with two loops"},
+            {"slot_idx": 1, "char": "B", "confidence": 0.95, "legible": True, "note": "unmistakable B"},
         ],
     }
-    res_override = reconcile_vlm_with_ocr(mock_ocr, vlm_override)
-    slots_ov = {s["slot_idx"]: s for s in res_override["reconciled_slots"]}
-    assert slots_ov[1]["final_char"] == "B"
-    assert slots_ov[1]["action"] == "VLM_OVERRIDE_LOCKED"
+    res_dispute = reconcile_vlm_with_ocr(mock_ocr, vlm_dispute_high)
+    slots_d = {s["slot_idx"]: s for s in res_dispute["reconciled_slots"]}
+    assert slots_d[1]["final_char"] == "P"
+    assert slots_d[1]["action"] == "LOCKED_VLM_DISPUTED"
+    assert slots_d[1]["confidence_penalty"] == -0.05
 
 
 def test_reconciliation_contradictory_tie_break(dummy_track_env):
-    """Test CONTRADICTORY slot tie-breaking between Pipe A and Pipe B."""
+    """Test CONTRADICTORY slot tie-breaking restricted to OCR candidates only."""
     _, _, mock_ocr = dummy_track_env
 
     # Slot 4: OCR Pipe A="B", Pipe B="8"
@@ -178,24 +180,35 @@ def test_reconciliation_contradictory_tie_break(dummy_track_env):
     assert slots_b[4]["final_char"] == "8"
     assert slots_b[4]["action"] == "TIE_BREAK_PIPE_B"
 
-    # Case C: VLM selects a 3rd distinct character ("D") with high confidence
+    # Case C: VLM selects a 3rd candidate NOT in OCR candidates -> VLM_ABSTAINED -> '?'
     vlm_tie_c = {
         "slot_reads": [
-            {"slot_idx": 4, "char": "D", "confidence": 0.78, "legible": True, "note": "single large curve D"},
+            {"slot_idx": 4, "char": "D", "confidence": 0.95, "legible": True, "note": "single large curve D"},
         ]
     }
     res_c = reconcile_vlm_with_ocr(mock_ocr, vlm_tie_c)
     slots_c = {s["slot_idx"]: s for s in res_c["reconciled_slots"]}
-    assert slots_c[4]["final_char"] == "D"
-    assert slots_c[4]["action"] == "VLM_INDEPENDENT_CHOICE"
+    assert slots_c[4]["final_char"] == "?"
+    assert slots_c[4]["action"] == "VLM_ABSTAINED"
+
+    # Case D: VLM outputs '?' or low confidence -> VLM_ABSTAINED -> '?'
+    vlm_tie_d = {
+        "slot_reads": [
+            {"slot_idx": 4, "char": "?", "confidence": 0.30, "legible": False, "note": "ambiguous"},
+        ]
+    }
+    res_d = reconcile_vlm_with_ocr(mock_ocr, vlm_tie_d)
+    slots_d = {s["slot_idx"]: s for s in res_d["reconciled_slots"]}
+    assert slots_d[4]["final_char"] == "?"
+    assert slots_d[4]["action"] == "VLM_ABSTAINED"
 
 
 def test_reconciliation_unreadable_anti_hallucination(dummy_track_env):
-    """Test UNREADABLE anti-hallucination guard preserves '?' unless highly confident."""
+    """Test UNREADABLE hard-block: any unreadable slot stays '?' regardless of VLM confidence."""
     _, _, mock_ocr = dummy_track_env
 
     # Slot 9 is UNREADABLE in mock_ocr
-    # Case A: VLM reports illegible or guesses with low confidence (0.60)
+    # Case A: VLM reports illegible / low confidence guess (0.60)
     vlm_guess = {
         "slot_reads": [
             {"slot_idx": 9, "char": "4", "confidence": 0.60, "legible": False, "note": "might be 4 or 1"},
@@ -205,17 +218,19 @@ def test_reconciliation_unreadable_anti_hallucination(dummy_track_env):
     slots_g = {s["slot_idx"]: s for s in res_guess["reconciled_slots"]}
     assert slots_g[9]["final_char"] == "?"
     assert slots_g[9]["action"] == "FORBIDDEN_KEEP_UNKNOWN"
+    assert slots_g[9]["vlm_blind_raw_char"] == "4"
 
-    # Case B: VLM clearly resolves unreadable with >= 0.85 confidence
-    vlm_resolve = {
+    # Case B: VLM reports high confidence (0.95) guess: STILL hard-blocked from final_plate
+    vlm_high_guess = {
         "slot_reads": [
-            {"slot_idx": 9, "char": "0", "confidence": 0.91, "legible": True, "note": "crisp round 0 visible on frame 11"},
+            {"slot_idx": 9, "char": "0", "confidence": 0.95, "legible": True, "note": "clear round 0"},
         ]
     }
-    res_res = reconcile_vlm_with_ocr(mock_ocr, vlm_resolve)
-    slots_r = {s["slot_idx"]: s for s in res_res["reconciled_slots"]}
-    assert slots_r[9]["final_char"] == "0"
-    assert slots_r[9]["action"] == "VLM_RESOLVED_UNREADABLE"
+    res_high = reconcile_vlm_with_ocr(mock_ocr, vlm_high_guess)
+    slots_h = {s["slot_idx"]: s for s in res_high["reconciled_slots"]}
+    assert slots_h[9]["final_char"] == "?"
+    assert slots_h[9]["action"] == "FORBIDDEN_KEEP_UNKNOWN"
+    assert slots_h[9]["vlm_blind_raw_char"] == "0"
 
 
 def test_fallback_when_vlm_fails(dummy_track_env):

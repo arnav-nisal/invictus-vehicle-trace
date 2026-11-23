@@ -285,11 +285,30 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
     - Provider: Groq (`qwen/qwen3.8-27b`) in 3.61s.
     - Layout: `two_line`.
     - Stage 2.3 OCR: `UP15BE5580` $\to$ VLM: `UP15BE5580` $\to$ **Reconciled: `UP15BE5580`** (Valid State Code: `UP` = Uttar Pradesh).
-    - Actions: 7 `TRIPLE_CHECK_CONFIRMED`, 3 `TIE_BREAK_PIPE_A`.
+    - Actions: 6 `TRIPLE_CHECK_CONFIRMED`, 3 `TIE_BREAK_PIPE_A`, 1 `LOCKED_VLM_DISPUTED`.
   - **Track 2 (`simple_traffic_30s/track_002`)**:
-    - Tier 1 Groq hit OTPM rate limit; seamless automatic failover to Tier 2 NVIDIA NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`) in 5.58s.
     - Layout: `single_line`.
     - Stage 2.3 OCR: `????BG718?` (5 unreadable, 5 contradictory).
-    - VLM resolved unreadable state and district code `HR01` and trailing digit `4`.
-    - **Reconciled: `HR01BC7184`** (Valid State Code: `HR` = Haryana).
-    - Actions: 5 `VLM_RESOLVED_UNREADABLE`, 4 `TIE_BREAK_PIPE_A`, 1 `VLM_INDEPENDENT_CHOICE`.
+    - **Reconciled: `????BG718?`** (Valid State Code: False).
+    - Actions: 5 `FORBIDDEN_KEEP_UNKNOWN`, 5 `TIE_BREAK_PIPE_A`.
+
+---
+
+### 2026-11-24 03:25:00 IST — Hardening VLM Anti-Hallucination & Override Guards
+- **1. Hard-Block `UNREADABLE` Slots (`FORBIDDEN_KEEP_UNKNOWN`)**:
+  - Removed `VLM_RESOLVED_UNREADABLE` completely.
+  - Any slot marked `UNREADABLE` in Stage 2.3 strictly stays `'?'` in `final_plate`, regardless of VLM self-reported confidence.
+  - Preserves VLM's blind guess in `vlm_blind_raw_char` for audit visibility without polluting reconstructed registration.
+- **2. Restrict `CONTRADICTORY` Tie-Break to OCR Candidates Only**:
+  - Removed `VLM_INDEPENDENT_CHOICE`.
+  - On `CONTRADICTORY` slots, the VLM may only confirm Pipe A's candidate or Pipe B's candidate (`TIE_BREAK_PIPE_A` / `TIE_BREAK_PIPE_B`).
+  - If the VLM outputs `'?'` or a character not present in OCR candidates, the slot is demoted to `'?'` with action `VLM_ABSTAINED`.
+- **3. Protect `LOCKED` Slots from Single-VLM Overrides**:
+  - Removed `VLM_OVERRIDE_LOCKED`.
+  - If the VLM disagrees with a dual-OCR `LOCKED` slot, the OCR character is preserved and tagged `LOCKED_VLM_DISPUTED` with a $-0.05$ confidence penalty.
+- **4. Instant Multi-Tier Failover (`max_retries=0`)**:
+  - Configured `max_retries=0` on OpenAI client instances for Groq and NVIDIA NIM to avoid long internal SDK retry sleeps on rate limits, enabling immediate failover across tiers.
+- **5. Verification Outcome**:
+  - **Track 2 (`simple_traffic_30s/track_002`)**: Reconciled plate correctly outputs **`????BG718?`** with zero hallucinated state code or characters (5 `FORBIDDEN_KEEP_UNKNOWN`, 5 `TIE_BREAK_PIPE_A`).
+  - **Track 27 (`activa_signal/track_027`)**: Reconciled plate held firm as **`UP15BE5580`** (6 `TRIPLE_CHECK_CONFIRMED`, 3 `TIE_BREAK_PIPE_A`, 1 `LOCKED_VLM_DISPUTED`).
+  - **Unit Tests**: 46/46 unit tests passing ($100\%$).

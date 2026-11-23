@@ -317,7 +317,7 @@ class VLMClient:
         if not self.groq_api_key:
             raise ValueError("GROQ_API_KEY is not set.")
 
-        client = OpenAI(base_url=GROQ_BASE_URL, api_key=self.groq_api_key)
+        client = OpenAI(base_url=GROQ_BASE_URL, api_key=self.groq_api_key, max_retries=0)
         start_t = time.time()
 
         try:
@@ -358,7 +358,7 @@ class VLMClient:
         if not self.nvidia_api_key:
             raise ValueError("NVIDIA_API_KEY is not set.")
 
-        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=self.nvidia_api_key)
+        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=self.nvidia_api_key, max_retries=0)
         start_t = time.time()
 
         resp = client.chat.completions.create(
@@ -523,6 +523,7 @@ def reconcile_vlm_with_ocr(
                 "pipe_a_candidate": s.get("pipe_a_top", "?"),
                 "pipe_b_candidate": s.get("pipe_b_top", "?"),
                 "vlm_char": None,
+                "vlm_blind_raw_char": None,
                 "vlm_conf": 0.0,
                 "vlm_legible": False,
                 "final_char": s.get("char", "?"),
@@ -604,23 +605,20 @@ def reconcile_vlm_with_ocr(
         final_char = ocr_char
         action = "UNRESOLVED"
 
-        # --- Rule 1: LOCKED Slots ---
+        # --- Rule 1: LOCKED Slots (Triple-Check Protection) ---
         if ocr_bucket == "LOCKED":
             if v_char == ocr_char:
                 action = "TRIPLE_CHECK_CONFIRMED"
                 final_char = ocr_char
-            elif v_legible and v_conf >= 0.90 and v_char.isalnum() and v_char != "?":
-                # High-certainty visual override of OCR
-                action = "VLM_OVERRIDE_LOCKED"
-                final_char = v_char
             else:
-                # OCR dual pipeline agreement held firm
-                action = "LOCKED_PRESERVED_OVER_VLM"
+                # Disagreed with 2-OCR consensus: keep OCR char, tag disputed with -0.05 penalty
+                action = "LOCKED_VLM_DISPUTED"
                 final_char = ocr_char
 
-        # --- Rule 2: CONTRADICTORY Slots ---
+        # --- Rule 2: CONTRADICTORY Slots (Tie-Break to OCR Candidates Only) ---
         elif ocr_bucket == "CONTRADICTORY":
-            if v_legible and v_conf >= 0.70 and v_char.isalnum() and v_char != "?":
+            ocr_cands = [c for c in [pipe_a_cand, pipe_b_cand] if c and c != "?"]
+            if v_legible and v_conf >= 0.70 and v_char.isalnum() and v_char in ocr_cands:
                 if v_char == pipe_a_cand:
                     action = "TIE_BREAK_PIPE_A"
                     final_char = pipe_a_cand
@@ -628,46 +626,45 @@ def reconcile_vlm_with_ocr(
                     action = "TIE_BREAK_PIPE_B"
                     final_char = pipe_b_cand
                 else:
-                    action = "VLM_INDEPENDENT_CHOICE"
-                    final_char = v_char
-            else:
-                # VLM unclear; fallback to stronger OCR pipe candidate if above noise floor
-                if max(pipe_a_conf, pipe_b_conf) >= 0.38:
-                    action = "OCR_HIGHER_CONF_FALLBACK"
-                    final_char = pipe_a_cand if pipe_a_conf >= pipe_b_conf else pipe_b_cand
-                else:
-                    action = "FORBIDDEN_KEEP_UNKNOWN"
+                    action = "VLM_ABSTAINED"
                     final_char = "?"
-
-        # --- Rule 3: UNREADABLE Slots ---
-        else:  # UNREADABLE
-            if v_legible and v_conf >= 0.85 and v_char.isalnum() and v_char != "?":
-                # VLM clearly resolved an OCR dropout
-                action = "VLM_RESOLVED_UNREADABLE"
-                final_char = v_char
             else:
-                # Anti-hallucination guard: preserve unknown
-                action = "FORBIDDEN_KEEP_UNKNOWN"
+                # VLM output '?' or character not in OCR candidates, or low confidence: demote to '?'
+                action = "VLM_ABSTAINED"
                 final_char = "?"
+
+        # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination) ---
+        else:  # UNREADABLE
+            # Zero hallucination: any UNREADABLE slot strictly stays '?' regardless of VLM confidence
+            action = "FORBIDDEN_KEEP_UNKNOWN"
+            final_char = "?"
 
         actions_summary[action] = actions_summary.get(action, 0) + 1
 
-        reconciled_slots.append({
+        slot_data = {
             "slot_idx": i,
             "ocr_char": ocr_char,
             "ocr_bucket": ocr_bucket,
             "pipe_a_candidate": pipe_a_cand,
             "pipe_b_candidate": pipe_b_cand,
             "vlm_char": v_char,
+            "vlm_blind_raw_char": v_char,
             "vlm_conf": round(v_conf, 3),
             "vlm_legible": v_legible,
             "final_char": final_char,
             "action": action,
             "note": v_note,
-        })
+        }
+        if action == "LOCKED_VLM_DISPUTED":
+            slot_data["confidence_penalty"] = -0.05
+
+        reconciled_slots.append(slot_data)
 
     reconciled_plate = "".join(s["final_char"] for s in reconciled_slots)
     state_valid = validate_state_code(reconciled_plate)
+    ocr_overall_conf = float(ocr_result.get("overall_confidence", 0.0))
+    disputed_count = actions_summary.get("LOCKED_VLM_DISPUTED", 0)
+    adjusted_conf = max(0.0, round(ocr_overall_conf - (disputed_count * 0.05), 4))
 
     return {
         "schema_version": "2.4.0",
@@ -680,6 +677,8 @@ def reconcile_vlm_with_ocr(
         "stage_2_3_plate": recovered_ocr,
         "vlm_raw_plate": vlm_raw_text or None,
         "reconciled_plate": reconciled_plate,
+        "overall_confidence": adjusted_conf,
+        "confidence_penalty_total": round(disputed_count * -0.05, 2),
         "state_code_valid": state_valid,
         "plate_layout": vlm_layout,
         "reconciled_slots": reconciled_slots,
