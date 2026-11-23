@@ -2,7 +2,7 @@
 """Comprehensive Verification Test Suite for Open-Source LLM Vehicle Attribute Extractor.
 
 Validates:
-1. Pydantic return model, field names, and confidence bounds match backend/attribute_extractor.py.
+1. Pydantic return model, field names, and confidence bounds.
 2. Prompt normalization rules (body type aliases, colour lowercase, make/model Unknown logic).
 3. Image preprocessing with Pillow (resizing >1024px, base64 JPEG format, up to 3 images, format conversion).
 4. Helper extract_vehicle_attributes_with_meta returns provider, model_used, latency_sec and supports unpacking.
@@ -28,13 +28,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from backend.attribute_extractor import (
-    ExtractedVehicleAttributes as OriginalModel,
-    VALID_BODY_TYPES,
-)
 from backend.opensource_extractor import (
     ExtractedVehicleAttributes,
     ExtractedVehicleAttributesWithMeta,
+    VALID_BODY_TYPES,
     _clean_and_parse_json,
     _normalize_and_validate,
     _prepare_images,
@@ -50,13 +47,7 @@ def print_section(title: str):
 
 
 def test_schema_equivalence():
-    print_section("1. Schema & Return Model Equivalence")
-    # Verify exact class equivalence
-    assert ExtractedVehicleAttributes is OriginalModel, (
-        "ExtractedVehicleAttributes must be imported directly from backend.attribute_extractor"
-    )
-
-    orig_fields = set(OriginalModel.model_fields.keys())
+    print_section("1. Schema & Return Model Validation")
     target_fields = {
         "body_type",
         "body_type_conf",
@@ -67,11 +58,12 @@ def test_schema_equivalence():
         "model",
         "model_conf",
     }
-    assert orig_fields == target_fields, f"Fields mismatch: {orig_fields} vs {target_fields}"
-    print("✓ Schema fields match exactly: " + ", ".join(sorted(orig_fields)))
+    model_fields = set(ExtractedVehicleAttributes.model_fields.keys())
+    assert model_fields == target_fields, f"Fields mismatch: {model_fields} vs {target_fields}"
+    print("✓ Schema fields match exactly: " + ", ".join(sorted(model_fields)))
 
     # Verify ExtractedVehicleAttributesWithMeta inheritance and fields
-    assert issubclass(ExtractedVehicleAttributesWithMeta, OriginalModel)
+    assert issubclass(ExtractedVehicleAttributesWithMeta, ExtractedVehicleAttributes)
     meta_fields = set(ExtractedVehicleAttributesWithMeta.model_fields.keys())
     expected_meta = target_fields | {"provider", "model_used", "latency_sec", "warning", "tier_errors"}
     assert meta_fields == expected_meta, f"Meta fields mismatch: {meta_fields}"
@@ -231,7 +223,7 @@ def test_helper_and_unpacking():
         coarse_class="motorcycle",
         track_id=1,
     )
-    assert isinstance(attrs, OriginalModel)
+    assert isinstance(attrs, ExtractedVehicleAttributes)
     assert isinstance(meta, dict)
     assert meta["provider"] == "local_fallback"
     assert meta["model_used"] == "local_heuristic"
@@ -245,7 +237,7 @@ def test_helper_and_unpacking():
 
     # Check extract_vehicle_attributes return type
     base_res = extract_vehicle_attributes(images=None, coarse_class="car", track_id=2)
-    assert type(base_res) is OriginalModel, f"Expected {OriginalModel}, got {type(base_res)}"
+    assert type(base_res) is ExtractedVehicleAttributes, f"Expected {ExtractedVehicleAttributes}, got {type(base_res)}"
     assert base_res.make == "Tata" and base_res.model == "Nexon"
     print("✓ extract_vehicle_attributes return type is strictly ExtractedVehicleAttributes.")
 
@@ -411,11 +403,10 @@ def test_api_endpoint_integration():
             print("✓ POST /api/vehicles/analyze returned 200 with explicit 'warning' on VLM outage:")
             print(f"  Warning in JSON response: {data['warning'][:80]}...")
 
-    # 3. Test analyze vehicle with EXTRACTOR_PROVIDER=gemini
-    with patch.dict(os.environ, {"EXTRACTOR_PROVIDER": "gemini"}):
-        resp_gem = client.post("/api/vehicles/analyze", json={"scenario_id": "scenario-1"})
-        assert resp_gem.status_code == 200
-        print("✓ EXTRACTOR_PROVIDER='gemini' remains fully supported via .env.")
+    # 3. Test standard analyze vehicle with opensource provider
+    resp_std = client.post("/api/vehicles/analyze", json={"scenario_id": "scenario-1"})
+    assert resp_std.status_code == 200
+    print("✓ POST /api/vehicles/analyze executed cleanly with open-source extractor.")
 
 
 def test_live_execution():

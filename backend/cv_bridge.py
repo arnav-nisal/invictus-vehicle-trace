@@ -268,24 +268,14 @@ def get_vehicle_evidence_for_track(
                 crop_img = cv2.imread(str(p))
                 break
 
-        provider = os.getenv("EXTRACTOR_PROVIDER", EXTRACTOR_PROVIDER).lower()
-        vlm_warning = None
-        if provider == "gemini":
-            from backend.attribute_extractor import extract_vehicle_attributes
-            attrs = extract_vehicle_attributes(
-                images=[crop_img] if crop_img is not None else [],
-                coarse_class=base_evidence.body_type.value,
-                track_id=track_id,
-            )
-        else:
-            from backend.opensource_extractor import extract_vehicle_attributes_with_meta
-            attrs_meta = extract_vehicle_attributes_with_meta(
-                images=[crop_img] if crop_img is not None else [],
-                coarse_class=base_evidence.body_type.value,
-                track_id=track_id,
-            )
-            attrs = attrs_meta.to_base_attributes()
-            vlm_warning = attrs_meta.warning
+        from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+        attrs_meta = extract_vehicle_attributes_with_meta(
+            images=[crop_img] if crop_img is not None else [],
+            coarse_class=base_evidence.body_type.value,
+            track_id=track_id,
+        )
+        attrs = attrs_meta.to_base_attributes()
+        vlm_warning = attrs_meta.warning
 
         base_evidence.colour = attrs.colour
         base_evidence.colour_conf = attrs.colour_conf
@@ -330,24 +320,14 @@ def get_vehicle_evidence_for_track(
                 crop_img = cv2.imread(str(p))
                 break
 
-        provider = os.getenv("EXTRACTOR_PROVIDER", EXTRACTOR_PROVIDER).lower()
-        vlm_warning: Optional[str] = None
-        if provider == "gemini":
-            from backend.attribute_extractor import extract_vehicle_attributes
-            attrs = extract_vehicle_attributes(
-                images=[crop_img] if crop_img is not None else [],
-                coarse_class=base_evidence.body_type.value,
-                track_id=track_id,
-            )
-        else:
-            from backend.opensource_extractor import extract_vehicle_attributes_with_meta
-            attrs_meta = extract_vehicle_attributes_with_meta(
-                images=[crop_img] if crop_img is not None else [],
-                coarse_class=base_evidence.body_type.value,
-                track_id=track_id,
-            )
-            attrs = attrs_meta.to_base_attributes()
-            vlm_warning = attrs_meta.warning
+        from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+        attrs_meta = extract_vehicle_attributes_with_meta(
+            images=[crop_img] if crop_img is not None else [],
+            coarse_class=base_evidence.body_type.value,
+            track_id=track_id,
+        )
+        attrs = attrs_meta.to_base_attributes()
+        vlm_warning = attrs_meta.warning
 
         base_evidence.colour = attrs.colour
         base_evidence.colour_conf = attrs.colour_conf
@@ -372,26 +352,14 @@ def get_vehicle_evidence_for_track(
             crop_img = cv2.imread(str(full_crop_path))
 
     # Determine colour and body type via attribute extractor (Gemini multimodal or Open-Source LLM cascade)
-    provider = os.getenv("EXTRACTOR_PROVIDER", EXTRACTOR_PROVIDER).lower()
-    class_name = tracks_meta_entry.get("class_name") or tracks_meta_entry.get("category", "car")
-    vlm_warning: Optional[str] = None
-
-    if provider == "gemini":
-        from backend.attribute_extractor import extract_vehicle_attributes
-        attrs = extract_vehicle_attributes(
-            images=[crop_img] if crop_img is not None else [],
-            coarse_class=class_name,
-            track_id=track_id,
-        )
-    else:
-        from backend.opensource_extractor import extract_vehicle_attributes_with_meta
-        attrs_meta = extract_vehicle_attributes_with_meta(
-            images=[crop_img] if crop_img is not None else [],
-            coarse_class=class_name,
-            track_id=track_id,
-        )
-        attrs = attrs_meta.to_base_attributes()
-        vlm_warning = attrs_meta.warning
+    from backend.opensource_extractor import extract_vehicle_attributes_with_meta
+    attrs_meta = extract_vehicle_attributes_with_meta(
+        images=[crop_img] if crop_img is not None else [],
+        coarse_class=class_name,
+        track_id=track_id,
+    )
+    attrs = attrs_meta.to_base_attributes()
+    vlm_warning = attrs_meta.warning
 
     try:
         body_type_enum = BodyType(attrs.body_type)
