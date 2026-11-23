@@ -1,4 +1,4 @@
-"""Vehicle Attribute Extractor using Google GenAI SDK (gemini-2.5-flash).
+"""Vehicle Attribute Extractor using Google GenAI SDK (gemini-3.6-flash / gemini-3.5-flash-lite).
 
 Extracts:
 1. body_type (strictly mapped to two-wheeler, car, suv, auto-rickshaw, truck, bus) + confidence
@@ -8,6 +8,7 @@ Extracts:
 
 Includes:
 - Structured JSON output via Pydantic model and google-genai SDK.
+- Primary model ID 'gemini-3.6-flash' with secondary model fallback 'gemini-3.5-flash-lite'.
 - Prompt tuned specifically for Indian road traffic CCTV surveillance angles.
 - Conservative confidence thresholding ('Unknown' for blurry or distant crops).
 - Silent local fallback using tracker coarse class and HSV color analysis when API key is missing or offline.
@@ -211,7 +212,8 @@ def extract_vehicle_attributes(
 ) -> ExtractedVehicleAttributes:
     """Extract vehicle body_type, colour, make, and model with confidence scores.
 
-    Uses Google GenAI SDK with gemini-2.5-flash when GEMINI_API_KEY is configured.
+    Uses Google GenAI SDK with gemini-3.6-flash (primary) and gemini-3.5-flash-lite
+    (secondary fallback) when GEMINI_API_KEY is configured.
     Falls back gracefully to local heuristic analyzer if key is absent or offline.
     """
     # Normalize input into a list of 1 to 3 images
@@ -252,42 +254,56 @@ def extract_vehicle_attributes(
                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
             )
 
-        logger.info(f"Querying gemini-2.5-flash with {len(jpeg_bytes_list)} image crop(s)...")
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ExtractedVehicleAttributes,
-                temperature=0.1,
-            ),
-        )
+        models_to_try = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+        last_error = None
 
-        if response.text:
-            parsed_json = json.loads(response.text)
-            # Normalize and enforce valid body type
-            raw_body = parsed_json.get("body_type", "").lower().strip()
-            if raw_body not in VALID_BODY_TYPES:
-                # Map close variants
-                if "motorcycle" in raw_body or "scooter" in raw_body or "bike" in raw_body:
-                    raw_body = "two-wheeler"
-                elif "rickshaw" in raw_body or "auto" in raw_body or "three" in raw_body:
-                    raw_body = "auto-rickshaw"
-                elif "sedan" in raw_body or "hatchback" in raw_body:
-                    raw_body = "car"
-                else:
-                    raw_body = "car"
-                parsed_json["body_type"] = raw_body
+        for model_id in models_to_try:
+            try:
+                logger.info(f"Querying {model_id} with {len(jpeg_bytes_list)} image crop(s)...")
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=ExtractedVehicleAttributes,
+                        temperature=0.1,
+                    ),
+                )
 
-            # Normalize colour
-            parsed_json["colour"] = parsed_json.get("colour", "white").lower().strip()
+                if response.text:
+                    parsed_json = json.loads(response.text)
+                    # Normalize and enforce valid body type
+                    raw_body = parsed_json.get("body_type", "").lower().strip()
+                    if raw_body not in VALID_BODY_TYPES:
+                        # Map close variants
+                        if "motorcycle" in raw_body or "scooter" in raw_body or "bike" in raw_body:
+                            raw_body = "two-wheeler"
+                        elif "rickshaw" in raw_body or "auto" in raw_body or "three" in raw_body:
+                            raw_body = "auto-rickshaw"
+                        elif "sedan" in raw_body or "hatchback" in raw_body:
+                            raw_body = "car"
+                        else:
+                            raw_body = "car"
+                        parsed_json["body_type"] = raw_body
 
-            result = ExtractedVehicleAttributes.model_validate(parsed_json)
-            logger.info(
-                f"Gemini attribute extraction successful: {result.make} {result.model} "
-                f"({result.colour} {result.body_type})"
+                    # Normalize colour
+                    parsed_json["colour"] = parsed_json.get("colour", "white").lower().strip()
+
+                    result = ExtractedVehicleAttributes.model_validate(parsed_json)
+                    logger.info(
+                        f"Google GenAI ({model_id}) extraction successful: {result.make} {result.model} "
+                        f"({result.colour} {result.body_type})"
+                    )
+                    return result
+            except Exception as model_err:
+                logger.warning(f"Attribute extraction via {model_id} failed: {model_err}")
+                last_error = model_err
+
+        if last_error:
+            logger.warning(
+                f"All Google GenAI models ({models_to_try}) failed. "
+                f"Falling back smoothly to local attribute analyzer."
             )
-            return result
 
     except Exception as exc:
         logger.warning(
