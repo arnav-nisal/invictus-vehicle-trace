@@ -68,3 +68,31 @@ This document records the technical challenges encountered during the developmen
 - **Symptom**: Initially, selecting a different vehicle or extracting its full-track frame history required re-running the entire YOLO object detection and BoT-SORT tracking pipeline over the video.
 - **Root Cause**: Frame-by-frame vehicle trajectories and bounding boxes were stored only in memory during the tracking pass and discarded after exporting the single-frame best crops and contact sheet.
 - **Impact**: Inability to quickly inspect multiple vehicles or iteratively test downstream license plate detection without enduring redundant GPU computation.
+
+---
+
+## 10. Frame-Exit and Video Outer Boundary Plate Truncation
+- **Symptom**: In both `activa_signal.mp4` (Track 27) and `simple_traffic_30s.mp4` (Track 2), the final selected plate crop had a cut-off plate (e.g. Frame 255 in Activa cut off on the right, and Frame 187 in Simple Traffic cut off at the bottom).
+- **Root Cause**: As vehicles exit the video frame, they are at their closest perspective point to the camera, achieving maximum pixel dimensions and high sharpness scores. Standard readability gates that only evaluate size and Laplacian variance favored these exit frames despite the license plate being sliced by the video frame outer border or the vehicle crop boundary.
+- **Impact**: Downstream OCR models received truncated, partial license plates as the highest-priority crops, inducing character recognition hallucination.
+
+---
+
+## 11. Dual-Detector Conflict Accounting Gaps & Spurious Box Hallucinations
+- **Symptom**: Audit funnel counts showed an accounting discrepancy where custom detector counts did not match the sum of dual and single detections. In Track 2, 27 dual detections with non-overlapping boxes ($\text{IoU} < 0.35$) were silently counted as single global detections.
+- **Root Cause**: When both detectors fired but had $\text{IoU} < 0.35$, the detector with higher confidence was designated the winner and its status was labeled `SINGLE_GLOBAL` or `SINGLE_CUSTOM`, masking the fact that both detectors had detected objects. Furthermore, Custom YOLO26 occasionally hallucinated large vehicle body regions ($>50\%$ of the vehicle crop) as plates.
+- **Impact**: Obscured conflicting detections in audit manifests and allowed spurious body-sized bounding boxes into conflict resolution.
+
+---
+
+## 12. Glare & Noise Outlier Sensitivity in Dynamic Readability Gating
+- **Symptom**: In multiple vehicle tracks, a single frame with camera sensor glare or high-frequency edge noise achieved an artificially extreme readability score (e.g. $>2800$). Because the dynamic gate used a threshold of $0.45 \times \text{peak\_score}$, dozens of clear, readable plate crops (scoring 800–1200) were rejected.
+- **Root Cause**: A single-frame maximum anchor ($\text{peak\_score}$) is vulnerable to statistical outliers and sensor artifacts.
+- **Impact**: Premature discarding of viable plate images, starving downstream multi-frame OCR consensus algorithms of valuable diverse frames.
+
+---
+
+## 13. Sub-Resolution Plate Dimensions for Manual Inspection and OCR
+- **Symptom**: Raw sliced plate crops on 1080p surveillance video ranged between $70\text{--}130\text{px}$ wide and $20\text{--}50\text{px}$ high. At these dimensions, characters were difficult for investigators to inspect visually, and OCR engines designed for standard document resolutions suffered degraded text segmentation.
+- **Root Cause**: Vehicles at mid-distance occupy only a fraction of the full camera frame, resulting in small native plate bounding boxes.
+- **Impact**: Poor investigator ergonomics during manual verification and sub-optimal OCR tokenization.

@@ -32,6 +32,7 @@ data/clips/
 
 # Output Directories & Generated Visuals
 outputs/
+runs/
 
 # Environment & Config Secrets
 .env

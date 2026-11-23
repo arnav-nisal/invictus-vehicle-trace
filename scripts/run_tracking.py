@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cv_pipeline.pipeline import VehicleTrackingPipeline
 from cv_pipeline.crop_extractor import interactive_vehicle_selection, extract_vehicle_crops
+from cv_pipeline.plate_detector import run_dual_plate_detection
 from cv_pipeline.config import (
     DEFAULT_MODEL_PATH,
     DEFAULT_TRACKER_CONFIG,
@@ -139,8 +140,20 @@ def parse_args():
     parser.add_argument(
         "--padding",
         type=float,
-        default=0.05,
-        help="Safety margin padding percentage around bounding box for vehicle crops (default: 0.05 = 5%)",
+        default=0.08,
+        help="Safety margin padding percentage around bounding box for vehicle crops (default: 0.08 = 8%)",
+    )
+    parser.add_argument(
+        "--crop-video",
+        type=str,
+        default=None,
+        help="Optional path to higher-resolution original video for source-mapped crop extraction (e.g. 4K original source)",
+    )
+    parser.add_argument(
+        "--detect-plates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run Stage 2.2 Dual-Detector license plate cropping & dynamic readability selection (default: True)",
     )
     return parser.parse_args()
 
@@ -173,8 +186,15 @@ def main():
     print("=" * 80)
 
     # Check for reuse-tracking
-    summary_path = Path(args.output_dir) / "tracks_summary.json"
-    history_path = Path(args.output_dir) / "track_history.json"
+    clip_specific_summary = Path(args.output_dir) / video_stem / "tracks_summary.json"
+    clip_specific_history = Path(args.output_dir) / video_stem / "track_history.json"
+    if clip_specific_summary.exists() and clip_specific_history.exists():
+        summary_path = clip_specific_summary
+        history_path = clip_specific_history
+        args.output_dir = str(Path(args.output_dir) / video_stem)
+    else:
+        summary_path = Path(args.output_dir) / "tracks_summary.json"
+        history_path = Path(args.output_dir) / "track_history.json"
     
     if args.reuse_tracking and summary_path.exists() and history_path.exists():
         print(f"\n[INFO] --reuse-tracking flag detected. Loading existing tracking data from {args.output_dir}...")
@@ -271,14 +291,26 @@ def main():
 
     # Stage 2: Interactive or Target Vehicle Selection & Full-Track Cropping
     if (args.target_id is not None or args.interactive) and track_history:
-        interactive_vehicle_selection(
+        vehicle_manifest = interactive_vehicle_selection(
             summary_data=summary,
             track_history=track_history,
             video_path=args.video,
             output_dir=args.output_dir,
             target_id=args.target_id,
             padding_pct=args.padding,
+            crop_video_path=args.crop_video,
         )
+
+        # Stage 2.2: Dual-Detector License Plate Cropping & Dynamic Readability Selection
+        if args.detect_plates and vehicle_manifest is not None and vehicle_manifest.get("crops"):
+            raw_dir_str = vehicle_manifest.get("raw_crops_dir", "")
+            if raw_dir_str:
+                crop_manifest_path = Path(raw_dir_str).parent / "crop_manifest.json"
+                if crop_manifest_path.exists():
+                    run_dual_plate_detection(
+                        crop_manifest_path=crop_manifest_path,
+                        device=args.device,
+                    )
 
 
 if __name__ == "__main__":
