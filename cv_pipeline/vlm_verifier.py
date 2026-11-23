@@ -30,7 +30,12 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from cv_pipeline.ocr_engine import _VALID_STATE_CODES, validate_state_code
+from cv_pipeline.ocr_engine import (
+    _SLOT_TYPES_CORRECT,
+    _VALID_STATE_CODES,
+    _apply_typed_swap,
+    validate_state_code,
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -491,6 +496,87 @@ class VLMClient:
 
 
 # ---------------------------------------------------------------------------
+# Beam Search Ghost Predictions (Advisory / UI Hover Re-Ranking)
+# ---------------------------------------------------------------------------
+def compute_ghost_predictions(
+    reconciled_slots: List[Dict[str, Any]],
+    plate_len: int,
+    beam_width: int = 8,
+    max_predictions: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Lightweight beam search generating top-3 distinct full-plate hypotheses for UI hover paths.
+    Scores hypotheses by mean soft_score across slots plus a +0.08 Indian state code validity bonus.
+    Never alters ground-truth final_plate.
+    """
+    candidate_pool: List[List[Tuple[str, float, bool]]] = []
+    for s in reconciled_slots:
+        tone = s.get("ui_tile_tone", "unknown")
+        final_c = s.get("final_char", "?")
+        f_score = float(s.get("final_char_soft_score", 0.0))
+        g_stack = s.get("ghost_stack", [])
+
+        if tone == "green":
+            # Anchored strictly to final_char (no branching)
+            candidate_pool.append([(final_c, f_score, False)])
+        elif tone == "black":
+            # final_char + up to top 2 conflict_alt candidates
+            cands = [(final_c, f_score, False)]
+            for g in g_stack[:2]:
+                cands.append((g["char"], float(g["soft_score"]), True))
+            candidate_pool.append(cands)
+        else:  # "unknown" ('?')
+            # top 3 ghost_fill candidates (if empty, keep '?')
+            if not g_stack:
+                candidate_pool.append([("?", 0.0, True)])
+            else:
+                candidate_pool.append([
+                    (g["char"], float(g["soft_score"]), True) for g in g_stack[:3]
+                ])
+
+    beam: List[Tuple[str, float, List[int]]] = [("", 0.0, [])]  # (prefix, cumulative_score, ghost_indices)
+
+    effective_len = min(plate_len, len(candidate_pool))
+    for i in range(effective_len):
+        slot_cands = candidate_pool[i]
+        next_beam: List[Tuple[str, float, List[int]]] = []
+        for prefix, cum_score, ghost_indices in beam:
+            for char, score, is_ghost in slot_cands:
+                new_ghosts = ghost_indices + ([i] if is_ghost else [])
+                next_beam.append((prefix + char, cum_score + score, new_ghosts))
+        next_beam.sort(key=lambda x: x[1], reverse=True)
+        beam = next_beam[:beam_width]
+
+    scored_hypotheses = []
+    for plate_str, cum_score, ghost_indices in beam:
+        base_score = cum_score / effective_len if effective_len > 0 else 0.0
+        state_valid = validate_state_code(plate_str)
+        bonus = 0.08 if state_valid else 0.0
+        total_score = round(base_score + bonus, 3)
+        scored_hypotheses.append({
+            "plate": plate_str,
+            "soft_score": total_score,
+            "state_code_valid": state_valid,
+            "ghost_slot_indices": ghost_indices,
+        })
+
+    # Sort descending by soft_score, prioritizing valid state codes on ties
+    scored_hypotheses.sort(key=lambda x: (x["soft_score"], x["state_code_valid"]), reverse=True)
+
+    distinct: List[Dict[str, Any]] = []
+    seen = set()
+    for h in scored_hypotheses:
+        if h["plate"] not in seen:
+            seen.add(h["plate"])
+            h["rank"] = len(distinct) + 1
+            distinct.append(h)
+            if len(distinct) == max_predictions:
+                break
+
+    return distinct
+
+
+# ---------------------------------------------------------------------------
 # Slot-by-Slot 3-Bucket Reconciliation
 # ---------------------------------------------------------------------------
 def reconcile_vlm_with_ocr(
@@ -504,9 +590,12 @@ def reconcile_vlm_with_ocr(
     """
     Arbitrate between Stage 2.3 OCR and Stage 2.4 Blind VLM results.
     Enforces:
-      - LOCKED: VLM acts as triple-check (preserves OCR unless VLM >= 0.90 certainty disagree).
-      - CONTRADICTORY: VLM acts as tie-breaker (prefers pipe agreement or confident candidate).
-      - UNREADABLE: Anti-hallucination guard (FORBIDDEN_KEEP_UNKNOWN unless VLM >= 0.85 certainty).
+      - Pre-reconciliation VLM disambiguation (0.92x discount on blur-swapped chars).
+      - LOCKED: Triple-check confirmation (LOCKED_VLM_DISPUTED on mismatch, -0.05 penalty).
+      - CONTRADICTORY: Tie-break strictly restricted to OCR candidates (VLM_ABSTAINED if other).
+      - UNREADABLE: Hard-block anti-hallucination (FORBIDDEN_KEEP_UNKNOWN, never promoted).
+      - Per-slot ui_tile_tone ('green', 'black', 'unknown') and deduplicated ghost_stack.
+      - Top-3 ghost_predictions via lightweight beam search.
     """
     recovered_ocr = ocr_result.get("recovered_plate", "")
     ocr_slots = ocr_result.get("slots", [])
@@ -515,21 +604,35 @@ def reconcile_vlm_with_ocr(
     # Graceful fallback if VLM failed
     if not vlm_output:
         reconciled_slots = []
-        for s in ocr_slots:
+        for i, s in enumerate(ocr_slots):
+            c = s.get("char", "?")
+            bucket = s.get("bucket", "UNREADABLE")
+            tone = (
+                "green"
+                if bucket == "LOCKED" and c != "?"
+                else ("black" if bucket == "CONTRADICTORY" and c != "?" else "unknown")
+            )
             reconciled_slots.append({
-                "slot_idx": s.get("slot", 0),
-                "ocr_char": s.get("char", "?"),
-                "ocr_bucket": s.get("bucket", "UNREADABLE"),
+                "slot_idx": s.get("slot", i),
+                "ocr_char": c,
+                "ocr_bucket": bucket,
                 "pipe_a_candidate": s.get("pipe_a_top", "?"),
                 "pipe_b_candidate": s.get("pipe_b_top", "?"),
                 "vlm_char": None,
                 "vlm_blind_raw_char": None,
+                "vlm_disambiguated_char": None,
                 "vlm_conf": 0.0,
                 "vlm_legible": False,
-                "final_char": s.get("char", "?"),
+                "final_char": c,
+                "final_char_soft_score": float(s.get("combined_conf", 0.0)),
                 "action": "FALLBACK_STAGE_2_3_OCR",
+                "ui_tile_tone": tone,
+                "ghost_stack": [],
+                "reasoning_notes": [],
                 "note": "VLM unavailable; preserved Stage 2.3 arbitration.",
             })
+
+        ghost_predictions = compute_ghost_predictions(reconciled_slots, plate_len)
 
         return {
             "schema_version": "2.4.0",
@@ -545,6 +648,7 @@ def reconcile_vlm_with_ocr(
             "state_code_valid": validate_state_code(recovered_ocr),
             "plate_layout": "unknown",
             "reconciled_slots": reconciled_slots,
+            "ghost_predictions": ghost_predictions,
             "actions_summary": {"FALLBACK_STAGE_2_3_OCR": len(reconciled_slots)},
         }
 
@@ -572,13 +676,20 @@ def reconcile_vlm_with_ocr(
             pipe_b_cand = str(s.get("pipe_b_top", "?")).upper()
             pipe_a_conf = float(s.get("pipe_a_conf", 0.0))
             pipe_b_conf = float(s.get("pipe_b_conf", 0.0))
+            slot_type = s.get("slot_type")
         else:
+            s = {}
             ocr_char = "?"
             ocr_bucket = "UNREADABLE"
             pipe_a_cand = "?"
             pipe_b_cand = "?"
             pipe_a_conf = 0.0
             pipe_b_conf = 0.0
+            slot_type = None
+
+        if not slot_type or slot_type == "?":
+            slot_types_list = _SLOT_TYPES_CORRECT.get(plate_len, _SLOT_TYPES_CORRECT[10])
+            slot_type = slot_types_list[i] if i < len(slot_types_list) else "D"
 
         # VLM slot data
         v_entry = vlm_slot_map.get(i)
@@ -602,18 +713,37 @@ def reconcile_vlm_with_ocr(
         if len(v_char) > 1:
             v_char = v_char[0]
 
+        vlm_blind_raw_char = v_char
+        reasoning_notes: List[str] = []
+
+        # 1. Pre-Reconciliation VLM Disambiguation
+        if v_char.isalnum():
+            swapped_char, discounted_conf, swap_note = _apply_typed_swap(v_char, slot_type, v_conf)
+            if swap_note:
+                vlm_disambiguated_char = swapped_char
+                v_char = swapped_char
+                v_conf = discounted_conf
+                reasoning_notes.append(f"vlm_disambiguated: '{vlm_blind_raw_char}'->'{swapped_char}'")
+            else:
+                vlm_disambiguated_char = v_char
+        else:
+            vlm_disambiguated_char = v_char
+
         final_char = ocr_char
         action = "UNRESOLVED"
+        ui_tile_tone = "unknown"
 
         # --- Rule 1: LOCKED Slots (Triple-Check Protection) ---
         if ocr_bucket == "LOCKED":
             if v_char == ocr_char:
                 action = "TRIPLE_CHECK_CONFIRMED"
                 final_char = ocr_char
+                ui_tile_tone = "green"
             else:
                 # Disagreed with 2-OCR consensus: keep OCR char, tag disputed with -0.05 penalty
                 action = "LOCKED_VLM_DISPUTED"
                 final_char = ocr_char
+                ui_tile_tone = "black"
 
         # --- Rule 2: CONTRADICTORY Slots (Tie-Break to OCR Candidates Only) ---
         elif ocr_bucket == "CONTRADICTORY":
@@ -622,24 +752,99 @@ def reconcile_vlm_with_ocr(
                 if v_char == pipe_a_cand:
                     action = "TIE_BREAK_PIPE_A"
                     final_char = pipe_a_cand
+                    ui_tile_tone = "black"
                 elif v_char == pipe_b_cand:
                     action = "TIE_BREAK_PIPE_B"
                     final_char = pipe_b_cand
+                    ui_tile_tone = "black"
                 else:
                     action = "VLM_ABSTAINED"
                     final_char = "?"
+                    ui_tile_tone = "unknown"
             else:
                 # VLM output '?' or character not in OCR candidates, or low confidence: demote to '?'
                 action = "VLM_ABSTAINED"
                 final_char = "?"
+                ui_tile_tone = "unknown"
 
         # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination) ---
         else:  # UNREADABLE
             # Zero hallucination: any UNREADABLE slot strictly stays '?' regardless of VLM confidence
             action = "FORBIDDEN_KEEP_UNKNOWN"
             final_char = "?"
+            ui_tile_tone = "unknown"
 
         actions_summary[action] = actions_summary.get(action, 0) + 1
+
+        # 2. Gather candidates and compute soft scores
+        raw_cands: Dict[str, Dict[str, float]] = {}
+
+        def _register_cand(c: str, src: str, conf_val: float):
+            if not c or c == "?" or not c.isalnum():
+                return
+            c = c.upper()
+            if c not in raw_cands:
+                raw_cands[c] = {"vlm": 0.0, "pipe_a": 0.0, "pipe_b": 0.0}
+            raw_cands[c][src] = max(raw_cands[c][src], float(conf_val))
+
+        if vlm_disambiguated_char and vlm_disambiguated_char != "?":
+            _register_cand(vlm_disambiguated_char, "vlm", v_conf)
+
+        if pipe_a_cand and pipe_a_cand != "?":
+            _register_cand(pipe_a_cand, "pipe_a", pipe_a_conf)
+        pa_runner = s.get("pipe_a_runner_up") if i < len(ocr_slots) else None
+        if pa_runner and pa_runner != "?":
+            _register_cand(pa_runner, "pipe_a", s.get("pipe_a_runner_up_conf", 0.0))
+
+        if pipe_b_cand and pipe_b_cand != "?":
+            _register_cand(pipe_b_cand, "pipe_b", pipe_b_conf)
+        pb_runner = s.get("pipe_b_runner_up") if i < len(ocr_slots) else None
+        if pb_runner and pb_runner != "?":
+            _register_cand(pb_runner, "pipe_b", s.get("pipe_b_runner_up_conf", 0.0))
+
+        # Calculate soft score for each candidate:
+        # soft_score = 0.45 * vlm_conf(c) + 0.30 * pipe_a_conf(c) + 0.25 * pipe_b_conf(c)
+        scored_cands = []
+        for c, confs in raw_cands.items():
+            sc = round(0.45 * confs["vlm"] + 0.30 * confs["pipe_a"] + 0.25 * confs["pipe_b"], 3)
+            src_list = [k for k, val in confs.items() if val > 0.0]
+            scored_cands.append({
+                "char": c,
+                "soft_score": sc,
+                "sources": src_list,
+            })
+
+        # Calculate final_char's soft_score (for beam search)
+        if final_char != "?":
+            fc_confs = raw_cands.get(final_char, {"vlm": 0.0, "pipe_a": 0.0, "pipe_b": 0.0})
+            final_char_soft_score = round(
+                0.45 * fc_confs["vlm"] + 0.30 * fc_confs["pipe_a"] + 0.25 * fc_confs["pipe_b"], 3
+            )
+            if ui_tile_tone == "green":
+                final_char_soft_score = max(final_char_soft_score, 0.75)
+        else:
+            final_char_soft_score = 0.0
+
+        # Build ghost_stack:
+        # - Drop candidates with soft_score < 0.12
+        # - Exclude final_char if tone is green or black
+        # - Tag kind: "ghost_fill" if tone == "unknown" else "conflict_alt"
+        ghost_entries = []
+        for cand in scored_cands:
+            if cand["soft_score"] < 0.12:
+                continue
+            if ui_tile_tone in ("green", "black") and cand["char"] == final_char:
+                continue
+            kind = "ghost_fill" if ui_tile_tone == "unknown" else "conflict_alt"
+            ghost_entries.append({
+                "char": cand["char"],
+                "soft_score": cand["soft_score"],
+                "kind": kind,
+                "sources": cand["sources"],
+            })
+
+        ghost_entries.sort(key=lambda x: x["soft_score"], reverse=True)
+        ghost_stack = ghost_entries[:3]
 
         slot_data = {
             "slot_idx": i,
@@ -648,11 +853,16 @@ def reconcile_vlm_with_ocr(
             "pipe_a_candidate": pipe_a_cand,
             "pipe_b_candidate": pipe_b_cand,
             "vlm_char": v_char,
-            "vlm_blind_raw_char": v_char,
+            "vlm_blind_raw_char": vlm_blind_raw_char,
+            "vlm_disambiguated_char": vlm_disambiguated_char,
             "vlm_conf": round(v_conf, 3),
             "vlm_legible": v_legible,
             "final_char": final_char,
+            "final_char_soft_score": final_char_soft_score,
             "action": action,
+            "ui_tile_tone": ui_tile_tone,
+            "ghost_stack": ghost_stack,
+            "reasoning_notes": reasoning_notes,
             "note": v_note,
         }
         if action == "LOCKED_VLM_DISPUTED":
@@ -665,6 +875,8 @@ def reconcile_vlm_with_ocr(
     ocr_overall_conf = float(ocr_result.get("overall_confidence", 0.0))
     disputed_count = actions_summary.get("LOCKED_VLM_DISPUTED", 0)
     adjusted_conf = max(0.0, round(ocr_overall_conf - (disputed_count * 0.05), 4))
+
+    ghost_predictions = compute_ghost_predictions(reconciled_slots, plate_len)
 
     return {
         "schema_version": "2.4.0",
@@ -682,6 +894,7 @@ def reconcile_vlm_with_ocr(
         "state_code_valid": state_valid,
         "plate_layout": vlm_layout,
         "reconciled_slots": reconciled_slots,
+        "ghost_predictions": ghost_predictions,
         "actions_summary": actions_summary,
     }
 
@@ -745,13 +958,16 @@ def verify_track_vlm(
         "enhanced_grid_path": str(enh_grid_path),
     }
 
-    # Step 5: Save vlm_result.json
-    out_path = t_dir / "vlm_result.json"
-    with open(out_path, "w", encoding="utf-8") as f:
+    # Step 5: Save vlm_result.json and final_plate_result.json
+    out_vlm = t_dir / "vlm_result.json"
+    out_final = t_dir / "final_plate_result.json"
+    with open(out_vlm, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+    with open(out_final, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
 
     logger.info(
         f"Stage 2.4 complete for {t_dir.name} -> {result['reconciled_plate']} "
-        f"(saved to {out_path.name})"
+        f"(saved to {out_vlm.name} and {out_final.name})"
     )
     return result

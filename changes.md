@@ -312,3 +312,37 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - **Track 2 (`simple_traffic_30s/track_002`)**: Reconciled plate correctly outputs **`????BG718?`** with zero hallucinated state code or characters (5 `FORBIDDEN_KEEP_UNKNOWN`, 5 `TIE_BREAK_PIPE_A`).
   - **Track 27 (`activa_signal/track_027`)**: Reconciled plate held firm as **`UP15BE5580`** (6 `TRIPLE_CHECK_CONFIRMED`, 3 `TIE_BREAK_PIPE_A`, 1 `LOCKED_VLM_DISPUTED`).
   - **Unit Tests**: 46/46 unit tests passing ($100\%$).
+
+---
+
+### 2026-11-24 04:15:00 IST — Stage 2.4 Upgrades: Pre-Reconciliation VLM Disambiguation, Per-Slot Ghost Stack & Top-3 Beam Search Predictions
+- **1. Pre-Reconciliation VLM Disambiguation (`cv_pipeline/vlm_verifier.py`)**:
+  - Wired `_apply_typed_swap` to run against blind VLM slot predictions based on slot typing (`D` vs `L`) before reconciliation.
+  - Automatically normalizes common optical ambiguities (`S->5`, `O->0`, `I->1`, `B->8`, `Z->2`, `G->6`, `A->4`, `T->7` on digit slots; `5->S`, `0->O`, `8->B`, etc. on letter slots).
+  - Preserves exact raw reading in `vlm_blind_raw_char`, normalized char in `vlm_disambiguated_char`, applies a $0.92\times$ confidence penalty, and logs `vlm_disambiguated: "<raw>-><fixed>"` in `reasoning_notes`.
+  - Cleanly converts false optical disputes (such as Track 27 Slot 6 `S` vs `5`) into `TRIPLE_CHECK_CONFIRMED`.
+- **2. Per-Slot UI Tile Tone & Deduplicated Ghost Stack**:
+  - Assigned visual styling tokens in `reconciled_slots` for frontend rendering:
+    - `ui_tile_tone = "green"`: `TRIPLE_CHECK_CONFIRMED`.
+    - `ui_tile_tone = "black"`: `TIE_BREAK_PIPE_A`, `TIE_BREAK_PIPE_B`, `LOCKED_VLM_DISPUTED`.
+    - `ui_tile_tone = "unknown"`: Unresolved slots (`final_char == '?'`, i.e., `FORBIDDEN_KEEP_UNKNOWN` / `VLM_ABSTAINED`).
+  - Computed per-candidate fused soft score:
+    $$\text{soft\_score}(c) = 0.45 \cdot \text{conf}_{\text{vlm}}(c) + 0.30 \cdot \text{conf}_{\text{pipe\_a}}(c) + 0.25 \cdot \text{conf}_{\text{pipe\_b}}(c)$$
+  - Deduplicated `ghost_stack` (max 3 entries, ordered descending by `soft_score`, pruning candidates $< 0.12$).
+  - For green and black tiles, excludes `final_char` and tags remaining alternatives as `kind: "conflict_alt"`. For unknown tiles, includes candidates tagged as `kind: "ghost_fill"`.
+- **3. Top-3 Ghost Predictions via Lightweight Beam Search**:
+  - Implemented `compute_ghost_predictions` with beam width 8 to compute advisory plate hypotheses for operator hover paths:
+    - Green slots: strictly anchored to `final_char`.
+    - Black slots: branches across `final_char` and top conflict alternatives.
+    - Unknown slots: branches across top ghost-fill candidates.
+  - Scoring incorporates average slot soft score plus $+0.08$ bonus if prefix matches an official Indian RTO state/UT code (`validate_state_code`).
+  - Emits top 3 ranked plates with metadata (`rank`, `plate`, `soft_score`, `state_code_valid`, `ghost_slot_indices`).
+  - Purely advisory: `final_plate` remains strictly zero-hallucination ground truth.
+- **4. Output Persistence & CLI Updates**:
+  - Writes both `vlm_result.json` and `final_plate_result.json` in the track output directory.
+  - Formatted terminal table in `scripts/run_vlm.py` with Tone, VLM Raw, Disambig, Reconciliation Action, and Ghost Stack columns, followed by the Ghost Predictions ranking block.
+- **5. Comprehensive Unit Testing & Benchmarking**:
+  - Added 3 dedicated unit tests in `tests/test_vlm_verifier.py` (`test_vlm_pre_disambiguation`, `test_ghost_stack_tagging_and_tone`, `test_beam_search_ghost_predictions`).
+  - Test suite: **49/49 tests passing ($100\%$)** in 5.7s.
+  - Benchmarked on `outputs/activa_signal/track_027` (Reconciled: `UP15BE5580` / Ghost 1: `UP15BE5580` at $0.779$) and `outputs/simple_traffic_30s/track_002` (Reconciled: `????B?718?` / Ghost 1: `HR01BC7184` at $0.645$).
+
