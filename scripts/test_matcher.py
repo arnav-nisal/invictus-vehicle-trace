@@ -168,7 +168,11 @@ def test_fastapi_endpoints(vehicles):
                 response_body.extend(message.get("body", b""))
 
         await app(scope, receive, send)
-        data = json.loads(response_body.decode()) if response_body else None
+        decoded = response_body.decode("utf-8") if response_body else ""
+        try:
+            data = json.loads(decoded)
+        except Exception:
+            data = decoded
         return status_code, data
 
     async def run_tests():
@@ -202,6 +206,13 @@ def test_fastapi_endpoints(vehicles):
         assert code == 200, f"Analyze returned {code}"
         assert analysis4["no_confident_match"] is True
         print(f"  [✓] POST /api/vehicles/analyze (scenario-4) -> 200 OK (no_confident_match: True)")
+
+        # 6. Report export endpoint with AnalysisResponse
+        code, html_content = await call_api("POST", "/api/reports/export", analysis)
+        assert code == 200, f"Report export returned {code}"
+        assert "FORENSIC VEHICLE TRACEABILITY REPORT" in html_content
+        assert "MH12??1432" in html_content
+        print(f"  [✓] POST /api/reports/export -> 200 OK ({len(html_content)} bytes self-contained HTML)")
 
     asyncio.run(run_tests())
     print("\n>>> TEST 5 PASSED: All FastAPI endpoints operational and returning valid schemas!")

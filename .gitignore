@@ -10,4 +10,6 @@ data/clips/
 *.db
 .env
 node_modules/
+dist/
+.DS_Store
 .agents/skills/

@@ -13,13 +13,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from backend.database import ensure_db_exists, get_all_registry_vehicles, get_total_vehicles_count
 from backend.demo_data import DEMO_SCENARIOS, MOCK_VIDEO_SCAN_RESPONSE
 from backend.matcher import match_and_rank_vehicles
+from backend.report import generate_forensic_html_report
 from backend.schemas import (
     AnalysisResponse,
     AnalyzeRequest,
@@ -277,3 +278,55 @@ async def analyze_vehicle(
     )
 
     return result
+
+
+@app.post(
+    "/api/reports/export",
+    response_class=HTMLResponse,
+    summary="Export Clean, Formal HTML Forensic Case Report",
+    tags=["Reporting"],
+)
+async def export_forensic_report(request: Request) -> HTMLResponse:
+    """Takes an AnalysisResponse payload and generates a clean, formal, self-contained
+    HTML forensic case report (text/html) with print-optimized @media print CSS and
+    a built-in 'Print / Save as PDF' toolbar.
+
+    Strictly compliant with AIML-01 requirements:
+    - Case timestamp & target tracking ID
+    - Keyframes and cropped plate images (base64 embedded with SVG fallback)
+    - Per-frame OCR recovery table with character confidences
+    - Final consensus partial plate highlighting ? unknown slots
+    - Detected vehicle colour & body type with confidence scores
+    - Ranked Top-5 shortlist or high-visibility 'No Confident Match' notice
+    - Plain-English match reasoning and chain-of-custody audit notes
+    """
+    try:
+        body = await request.json()
+        if not body:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Request body cannot be empty.",
+            )
+
+        # Support direct AnalysisResponse or {"analysis": AnalysisResponse}
+        if "analysis" in body and isinstance(body["analysis"], dict):
+            analysis_data = body["analysis"]
+        else:
+            analysis_data = body
+
+        analysis = AnalysisResponse.model_validate(analysis_data)
+        html_report = generate_forensic_html_report(analysis)
+        return HTMLResponse(
+            content=html_report,
+            media_type="text/html",
+            headers={"Content-Disposition": f'inline; filename="forensic-report-track-{analysis.track_id:03d}.html"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate forensic report: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid AnalysisResponse payload for report generation: {str(e)}",
+        )
+
