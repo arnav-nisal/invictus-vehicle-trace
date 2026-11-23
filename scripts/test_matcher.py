@@ -201,6 +201,12 @@ def test_fastapi_endpoints(vehicles):
         assert analysis["top_matches"][0]["plate_number"] == "MH12DE1432"
         print(f"  [✓] POST /api/vehicles/analyze (scenario-1) -> 200 OK (Rank 1: {analysis['top_matches'][0]['plate_number']})")
 
+        # 4b. Analyze endpoint with track_id via CV bridge
+        code, analysis_track = await call_api("POST", "/api/vehicles/analyze", {"track_id": 1})
+        assert code == 200, f"Analyze with track_id returned {code}"
+        assert analysis_track["top_matches"][0]["plate_number"] == "MH12DE1432"
+        print(f"  [✓] POST /api/vehicles/analyze (track_id=1 via CV bridge) -> 200 OK (Rank 1: {analysis_track['top_matches'][0]['plate_number']})")
+
         # 5. Analyze endpoint with scenario-4 (out of registry)
         code, analysis4 = await call_api("POST", "/api/vehicles/analyze", {"scenario_id": "scenario-4"})
         assert code == 200, f"Analyze returned {code}"

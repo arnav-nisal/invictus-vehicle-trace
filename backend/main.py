@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field
 
 from backend.database import ensure_db_exists, get_all_registry_vehicles, get_total_vehicles_count
 from backend.demo_data import DEMO_SCENARIOS, MOCK_VIDEO_SCAN_RESPONSE
+from backend.cv_bridge import (
+    get_vehicle_evidence_for_track,
+    scan_video_with_cv_pipeline,
+)
 from backend.matcher import match_and_rank_vehicles
 from backend.report import generate_forensic_html_report
 from backend.schemas import (
@@ -179,18 +183,21 @@ async def scan_video(
 ) -> VideoScanResponse:
     """Scan an uploaded video or demo clip to detect and track vehicles.
 
-    Hooks into CV tracking pipeline if present on disk; otherwise falls back
-    smoothly to realistic mock vehicle tracks so the frontend works immediately.
+    Hooks into Arnav's YOLO26s + BoT-SORT CV pipeline; maps tracked vehicles
+    to TrackSummary models and returns detailed vehicle tracks.
     Supports JSON payloads {"clip_id": "..."} as well as raw binary video streams.
     """
     content_type = request.headers.get("content-type", "")
     target_clip_id = payload.clip_id if payload else None
+    target_video_path = payload.video_path if payload else None
 
     if not target_clip_id and "application/json" in content_type:
         try:
             body = await request.json()
             if isinstance(body, dict):
                 target_clip_id = body.get("clip_id") or body.get("video_id")
+                if not target_video_path:
+                    target_video_path = body.get("video_path")
         except Exception:
             pass
 
@@ -203,18 +210,15 @@ async def scan_video(
                 with open(upload_path, "wb") as f:
                     f.write(content)
                 logger.info(f"Saved binary uploaded video clip to: {upload_path}")
+                target_video_path = str(upload_path)
         except Exception as e:
             logger.warning(f"Could not save uploaded video: {e}")
 
-    # Check if a custom CV pipeline module is present on disk
-    # (e.g. scripts/run_cv_pipeline.py or cv_pipeline module)
-    cv_pipeline_script = BASE_DIR / "scripts" / "run_cv_pipeline.py"
-    if cv_pipeline_script.exists():
-        logger.info(f"CV pipeline script detected at {cv_pipeline_script}. Attempting execution...")
-        pass
-
-    # Smooth fallback to realistic mock scanned vehicle tracks
-    return MOCK_VIDEO_SCAN_RESPONSE
+    # Use cv_bridge to scan or load existing CV pipeline tracks
+    return scan_video_with_cv_pipeline(
+        clip_id=target_clip_id,
+        video_path=target_video_path,
+    )
 
 
 @app.post(
@@ -230,8 +234,9 @@ async def analyze_vehicle(
 
     Accepts either:
     1. A full `evidence` (VehicleEvidence) payload.
-    2. A `scenario_id` (e.g., 'scenario-1', 'scenario-2', etc.) with optional
-       `known_partial_plate` witness hint.
+    2. A `scenario_id` (e.g., 'scenario-1', 'scenario-2', etc.) for instant preset analysis.
+    3. A `track_id` (e.g., 1, 2, 27) connecting directly to the CV bridge.
+    With optional `known_partial_plate` witness hint.
 
     Returns the ranked Top-5 shortlist of matching candidates, feature score
     breakdown, explainable match reasons, and calibrated confidence gating.
@@ -239,7 +244,7 @@ async def analyze_vehicle(
     evidence: Optional[VehicleEvidence] = payload.evidence
     known_hint: Optional[str] = payload.known_partial_plate
 
-    # If scenario_id provided, look up evidence from pre-configured scenarios
+    # If scenario_id provided, look up evidence from pre-configured scenarios (instant presets)
     if not evidence and payload.scenario_id:
         scenario = DEMO_SCENARIOS.get(payload.scenario_id)
         if not scenario:
@@ -250,13 +255,19 @@ async def analyze_vehicle(
         evidence = scenario.evidence
         # If user didn't provide a known_partial_plate hint, check scenario default
         if not known_hint and scenario.suggested_known_partial_plate:
-            # Note: keep known_hint as supplied unless user specifically desires it
             pass
+
+    # If track_id provided without direct evidence, extract via CV bridge
+    if not evidence and payload.track_id is not None:
+        try:
+            evidence = get_vehicle_evidence_for_track(payload.track_id)
+        except Exception as e:
+            logger.warning(f"CV bridge extraction for track {payload.track_id} failed: {e}")
 
     if not evidence:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Either 'evidence' or a valid 'scenario_id' must be provided.",
+            detail="Either 'evidence', a valid 'scenario_id', or a 'track_id' must be provided.",
         )
 
     # Load registry records

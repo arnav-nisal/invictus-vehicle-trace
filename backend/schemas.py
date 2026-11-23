@@ -434,6 +434,11 @@ class AnalyzeRequest(BaseModel):
         description="Optional ID of a pre-configured demo scenario (e.g., 'scenario-1', 'scenario-2').",
         examples=["scenario-1"],
     )
+    track_id: Optional[int] = Field(
+        default=None,
+        description="Optional tracked vehicle integer ID to analyze via the CV bridge.",
+        examples=[1, 2, 27],
+    )
     evidence: Optional[VehicleEvidence] = Field(
         default=None,
         description="Extracted visual and OCR evidence for a tracked vehicle.",
