@@ -623,6 +623,18 @@ def compute_ghost_predictions(
     return distinct
 
 
+def _char_matches_slot_type(ch: str, slot_type: Optional[str]) -> bool:
+    """Check if character matches the expected Indian format type (LETTER / DIGIT)."""
+    if not ch or not ch.isalnum():
+        return False
+    st = str(slot_type).upper() if slot_type else ""
+    if st in ("L", "LETTER"):
+        return ch.isalpha()
+    if st in ("D", "DIGIT"):
+        return ch.isdigit()
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Slot-by-Slot 3-Bucket Reconciliation
 # ---------------------------------------------------------------------------
@@ -724,10 +736,12 @@ def reconcile_vlm_with_ocr(
             s = ocr_slots[i]
             ocr_char = str(s.get("char", "?")).upper()
             ocr_bucket = s.get("bucket", "UNREADABLE")
-            pipe_a_cand = str(s.get("pipe_a_top", "?")).upper()
-            pipe_b_cand = str(s.get("pipe_b_top", "?")).upper()
-            pipe_a_conf = float(s.get("pipe_a_conf", 0.0))
-            pipe_b_conf = float(s.get("pipe_b_conf", 0.0))
+            pipe_a_cand = str(s.get("pipe_a_top") or s.get("pipe_a_candidate") or "?").upper()
+            pipe_b_cand = str(s.get("pipe_b_top") or s.get("pipe_b_candidate") or "?").upper()
+            pa_conf_raw = s.get("pipe_a_conf") if s.get("pipe_a_conf") is not None else s.get("pipe_a_confidence", 0.0)
+            pipe_a_conf = float(pa_conf_raw or 0.0)
+            pb_conf_raw = s.get("pipe_b_conf") if s.get("pipe_b_conf") is not None else s.get("pipe_b_confidence", 0.0)
+            pipe_b_conf = float(pb_conf_raw or 0.0)
             slot_type = s.get("slot_type")
         else:
             s = {}
@@ -819,12 +833,27 @@ def reconcile_vlm_with_ocr(
                 final_char = "?"
                 ui_tile_tone = "unknown"
 
-        # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination) ---
+        # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination + Unanimous Low-Conf Rescue) ---
         else:  # UNREADABLE
-            # Zero hallucination: any UNREADABLE slot strictly stays '?' regardless of VLM confidence
-            action = "FORBIDDEN_KEEP_UNKNOWN"
-            final_char = "?"
-            ui_tile_tone = "unknown"
+            unanimous_char = vlm_disambiguated_char
+            is_valid_type = _char_matches_slot_type(unanimous_char, slot_type)
+            is_non_empty = bool(
+                pipe_a_cand and pipe_b_cand and unanimous_char
+                and pipe_a_cand != "?" and pipe_b_cand != "?" and unanimous_char != "?"
+            )
+            is_unanimous = is_non_empty and (pipe_a_cand == pipe_b_cand == unanimous_char)
+            is_conf_ok = (pipe_a_conf >= 0.15 and pipe_b_conf >= 0.15 and v_conf >= 0.80)
+
+            if is_unanimous and is_conf_ok and is_valid_type:
+                action = "UNANIMOUS_LOW_CONF_RESCUE"
+                final_char = unanimous_char
+                ui_tile_tone = "black"
+                reasoning_notes.append("unanimous_low_conf_rescue")
+            else:
+                # Zero hallucination: any UNREADABLE slot strictly stays '?'
+                action = "FORBIDDEN_KEEP_UNKNOWN"
+                final_char = "?"
+                ui_tile_tone = "unknown"
 
         actions_summary[action] = actions_summary.get(action, 0) + 1
 
@@ -874,6 +903,8 @@ def reconcile_vlm_with_ocr(
             )
             if ui_tile_tone == "green":
                 final_char_soft_score = max(final_char_soft_score, 0.75)
+            elif action == "UNANIMOUS_LOW_CONF_RESCUE":
+                final_char_soft_score = min(final_char_soft_score, 0.70)
         else:
             final_char_soft_score = 0.0
 
@@ -911,6 +942,7 @@ def reconcile_vlm_with_ocr(
             "vlm_legible": v_legible,
             "final_char": final_char,
             "final_char_soft_score": final_char_soft_score,
+            "final_confidence": final_char_soft_score,
             "action": action,
             "ui_tile_tone": ui_tile_tone,
             "ghost_stack": ghost_stack,

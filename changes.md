@@ -450,3 +450,17 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - Added `test_vlm_verifier_auto_hierarchy` in `tests/test_multi_key_and_stage3.py`, validating that `"auto"` mode executes Tier 1 (NVIDIA) first, and only cascades to Tier 2 (Groq) and Tier 3 (Ollama) if all NVIDIA keys fail.
   - All **76/76 unit tests passing ($100\%$)** across the test suite in 7.30s.
 
+### 2026-11-24 07:45:00 IST — Stage 2.4 Anti-Overblocking Rule (`UNANIMOUS_LOW_CONF_RESCUE`)
+- **1. Surgical Unanimous Rescue Rule (`cv_pipeline/vlm_verifier.py`)**:
+  - Added `UNANIMOUS_LOW_CONF_RESCUE` in `reconcile_vlm_with_ocr` for `UNREADABLE` slots where ALL 4 conditions hold:
+    1. `pipe_a_cand == pipe_b_cand == vlm_disambiguated_char` (non-empty and not `'?'`).
+    2. `pipe_a_conf >= 0.15` and `pipe_b_conf >= 0.15`.
+    3. `v_conf >= 0.80`.
+    4. Character matches the slot's expected Indian format type (`LETTER` / `DIGIT` checked via `_char_matches_slot_type`).
+  - Sets `action = "UNANIMOUS_LOW_CONF_RESCUE"`, `ui_tile_tone = "black"`, logs `"unanimous_low_conf_rescue"` in `reasoning_notes`, caps `final_char_soft_score` and `final_confidence` at `0.70`, and excludes the resolved character from `ghost_stack`.
+  - Disagreements or failing any condition continue to be strictly hard-blocked (`FORBIDDEN_KEEP_UNKNOWN`, `'?'`, `ui_tile_tone = "unknown"`).
+- **2. Unit Tests & Ground-Truth Verification**:
+  - Added `test_unanimous_low_conf_rescue` and `test_unreadable_disagreements_stay_unknown` in `tests/test_vlm_verifier.py`.
+  - All **78/78 unit tests passing ($100\%$)** across the test suite in 7.26s.
+  - Re-verified `outputs/simple_traffic_30s/track_002`: plate strictly remains `????BG718?` with zero hallucination.
+
