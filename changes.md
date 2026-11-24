@@ -464,3 +464,35 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - All **78/78 unit tests passing ($100\%$)** across the test suite in 7.26s.
   - Re-verified `outputs/simple_traffic_30s/track_002`: plate strictly remains `????BG718?` with zero hallucination.
 
+### 2026-11-24 08:15:00 IST — Full FastAPI Backend Bridge (Screens 1, 2, 3) & Forensic PDF Dossier Generator
+- **1. Screen 1 & Screen 2 Static Mounts & Utility Endpoints (`backend/main.py`)**:
+  - Mounted `/media/clips` to `data/Final` (with case-insensitive fallback to `data/final` supporting HTTP 206 Range video streaming).
+  - Mounted `/outputs` to `outputs/` for all crop, thumbnail, and grid visual assets.
+  - Added `GET /api/pipeline/clips`: Enumerates available clips with file metadata, duration, resolution, and stream URLs.
+  - Added `GET /api/registry/stats`: Direct SQLite count returning `{"total_records": <int>}`.
+- **2. Screen 2 Web Video Artifacts Engine (`cv_pipeline/web_artifacts.py`)**:
+  - Built `build_boxes_json()`: Transforms frame-by-frame track history into an $O(1)$ frame-indexed lookup dictionary (`boxes.json`) consumed by the frontend video canvas overlay.
+  - Built `generate_track_thumbnails()`: Extracts representative high-quality JPEG thumbnails (max 320px width at 85% quality) per track in a single sequential video pass (`thumbnails/track_<ID:03d>.jpg`).
+  - Added `POST /api/videos/select-local`: Strict path traversal check rejecting `..`, `/`, `\`; instant 0s cache hit if `boxes.json` and `tracks_summary.json` exist; otherwise dispatches asynchronous Stage 1 tracking on a dedicated single-worker thread pool (`STAGE1_EXECUTOR`).
+  - Added `GET /api/videos/{job_id}/status`: Polling endpoint returning live progress, stage step, and complete video metadata + track list.
+- **3. Screen 3 Unified Verification Endpoint (`backend/main.py`)**:
+  - Added `POST /api/pipeline/verify`: Executes end-to-end verification pipeline (Stage 2.1 crop extraction -> Stage 2.2 dual-detector plate detection -> Stage 2.3 dual OCR -> Stage 2.4 blind VLM triple-check -> Stage 3 vehicle attributes -> Stage 4 SQLite registry matching).
+  - Supports both single (`[20]`) and merged (`[20, 33]`) track IDs.
+  - Caches results to `verification_result.json` for instantaneous subsequent calls (<35ms return).
+- **4. Publication-Grade Forensic PDF Summary Report (`backend/pdf_report.py`)**:
+  - Built ReportLab PDF engine implementing the exact Invictus high-craft aesthetic:
+    - Palette: Obsidian (`#111111`), Warm Alabaster (`#F7F7F5`), Deep Emerald (`#047857`), Muted Amber (`#B45309`), Crisp Card White.
+    - Two-pass `NumberedCanvas` stamping "Page X of Y" in the running footer with audit metadata.
+    - Executive summary box with key forensic takeaways and confidence gating.
+    - Visual evidence gallery with embedded plate crops and vehicle contact strips.
+    - Hard plate character vector tile strip color-coded by reconciliation tone (`green`, `amber`, `red`, `black`).
+    - Top-3 advisory ghost predictions table.
+    - Slot-by-slot audit table detailing Pipe A, Pipe B, VLM read, and tie-breaking action.
+    - Vehicle intelligence section and ranked registry candidate matches with sighting timelines.
+  - Added `GET /api/reports/{job_id}/{track_key}/pdf`: Serves generated PDF documents with streaming FileResponse.
+- **5. Comprehensive Unit Testing & Live Verification**:
+  - Created [tests/test_web_api_and_pdf.py](file:///c:/Users/arnav/Documents/invictus-vehicle-trace/tests/test_web_api_and_pdf.py) with 9 automated tests covering clips listing, registry stats, path traversal security, cache hits, job polling, PDF generation, verification validation, and PDF download.
+  - Entire pytest suite expanded to **87/87 tests passing ($100\%$)** in 7.46s.
+  - Live verified on `data/Final/file_07.mp4`: Stage 1 tracked 44 vehicles in ~18s, generated `boxes.json` and 44 thumbnails; verified Track 20 through full 5-stage pipeline, generating 994KB publication-grade PDF dossier served via HTTP 200.
+
+

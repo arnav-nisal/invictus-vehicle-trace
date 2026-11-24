@@ -678,3 +678,6 @@ class VehicleTrackingPipeline:
 
         logger.info(f"Saved tracks summary to '{summary_file}' ({len(qualified_tracks)} clean vehicles recorded).")
         return clean_summary
+
+    process_video = run
+
