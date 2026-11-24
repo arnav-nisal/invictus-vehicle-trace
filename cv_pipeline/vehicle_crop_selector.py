@@ -227,16 +227,19 @@ def run_stage3_vehicle_attributes(
         if m:
             track_id = int(m.group(1))
 
-    # Derive coarse_class from crop_manifest if available
-    if not coarse_class:
-        cm_path = t_dir / "crop_manifest.json"
-        if cm_path.is_file():
-            try:
-                with open(cm_path, "r", encoding="utf-8") as f:
-                    cm = json.load(f)
+    merged_ids = [track_id]
+    is_merged = False
+    cm_path = t_dir / "crop_manifest.json"
+    if cm_path.is_file():
+        try:
+            with open(cm_path, "r", encoding="utf-8") as f:
+                cm = json.load(f)
+            if not coarse_class:
                 coarse_class = cm.get("class_name") or cm.get("category")
-            except Exception:
-                pass
+            merged_ids = cm.get("merged_track_ids", [track_id])
+            is_merged = bool(cm.get("is_merged_track", False))
+        except Exception:
+            pass
 
     attrs_meta = extract_vehicle_attributes_with_meta(
         images=image_inputs,
@@ -249,6 +252,9 @@ def run_stage3_vehicle_attributes(
     result_payload = {
         "schema_version": "3.0.0",
         "track_id": track_id,
+        "target_id": track_id,
+        "merged_track_ids": merged_ids,
+        "is_merged_track": is_merged,
         "coarse_class": coarse_class or "unknown",
         "provider": attrs_meta.provider,
         "model_used": attrs_meta.model_used,

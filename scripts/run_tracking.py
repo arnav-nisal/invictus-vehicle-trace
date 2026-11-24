@@ -73,6 +73,18 @@ def parse_args():
         help=f"Inference image size (default: {DEFAULT_IMGSZ})",
     )
     parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="Frame stride for tracking (default: None for smart auto, 2 if FPS>=24, 1 if low FPS)",
+    )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        default=False,
+        help="Skip Pass 2 annotated video rendering for maximum speed",
+    )
+    parser.add_argument(
         "--min-frames",
         type=int,
         default=DEFAULT_MIN_FRAMES,
@@ -236,9 +248,15 @@ def main():
             max_stitch_speed_px_s=args.max_speed,
             max_size_ratio=args.max_size_ratio,
             max_lateral_err_px=args.max_lateral_err,
+            stride=args.stride,
+            write_video=not args.no_video,
         )
 
-        summary = pipeline.run(video_path=args.video, output_video_name=output_video_name)
+        summary = pipeline.run(
+            video_path=args.video,
+            output_video_name=output_video_name,
+            write_video=not args.no_video,
+        )
         
         # Load track history produced by pipeline
         if history_path.exists():

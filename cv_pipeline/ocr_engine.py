@@ -726,6 +726,8 @@ class PlateOCREngine:
             manifest = json.load(f)
 
         track_id = manifest.get("track_id")
+        merged_track_ids = manifest.get("merged_track_ids", [track_id])
+        is_merged_track = bool(manifest.get("is_merged_track", False))
         funnel = manifest.get("readability_funnel", {})
         p90 = funnel.get("p90_readability_score", 1000.0)
         # p95 approximation: 1.1 × p90 (since we don't store p95; close enough for weight norm)
@@ -736,7 +738,7 @@ class PlateOCREngine:
         logger.info(f"Track {track_id}: {n_frames} selected frames for OCR")
 
         if n_frames == 0:
-            return _empty_result(track_id, manifest_path)
+            return _empty_result(track_id, manifest_path, manifest)
 
         # --- gather candidate lengths to pick template ---
         candidate_texts: List[str] = []
@@ -936,6 +938,9 @@ class PlateOCREngine:
         result = {
             "schema_version": "2.3",
             "track_id": track_id,
+            "target_id": track_id,
+            "merged_track_ids": merged_track_ids,
+            "is_merged_track": is_merged_track,
             "n_frames_processed": len(frame_results),
             "plate_length": plate_length,
             "recovered_plate": recovered_plate,
@@ -963,10 +968,15 @@ class PlateOCREngine:
         return result
 
 
-def _empty_result(track_id, manifest_path: Path) -> Dict:
+def _empty_result(track_id, manifest_path: Path, manifest: Optional[Dict] = None) -> Dict:
+    merged_ids = manifest.get("merged_track_ids", [track_id]) if manifest else [track_id]
+    is_merged = bool(manifest.get("is_merged_track", False)) if manifest else False
     return {
         "schema_version": "2.3",
         "track_id": track_id,
+        "target_id": track_id,
+        "merged_track_ids": merged_ids,
+        "is_merged_track": is_merged,
         "n_frames_processed": 0,
         "plate_length": 10,
         "recovered_plate": "??????????",

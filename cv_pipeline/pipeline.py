@@ -84,6 +84,9 @@ class VehicleTrackingPipeline:
         max_size_ratio: float = DEFAULT_MAX_SIZE_RATIO,
         max_lateral_err_px: float = DEFAULT_MAX_LATERAL_ERR_PX,
         max_area_jump_ratio: float = DEFAULT_MAX_CONSECUTIVE_AREA_JUMP,
+        stride: Optional[int] = None,
+        half: Optional[bool] = None,
+        write_video: bool = True,
     ):
         self.model_path = model_path
         self.tracker_config = tracker_config
@@ -97,6 +100,13 @@ class VehicleTrackingPipeline:
         self.device = device
         self.max_area_jump_ratio = max_area_jump_ratio
         self.max_lateral_err_px = max_lateral_err_px
+        self.stride = stride
+        if half is None:
+            is_cuda = torch.cuda.is_available() and (str(self.device) in ("0", "cuda") or isinstance(self.device, int))
+            self.half = bool(is_cuda)
+        else:
+            self.half = bool(half)
+        self.write_video = write_video
 
         self.stitcher = TrackletStitcher(
             max_gap_seconds=max_stitch_gap_sec,
@@ -128,7 +138,12 @@ class VehicleTrackingPipeline:
             f"stitcher: max_gap={max_stitch_gap_sec}s, max_speed={max_stitch_speed_px_s}px/s"
         )
 
-    def run(self, video_path: str, output_video_name: str = "activa_signal_tracked.mp4") -> Dict[str, Any]:
+    def run(
+        self,
+        video_path: str,
+        output_video_name: str = "activa_signal_tracked.mp4",
+        write_video: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """Execute tracking pipeline on the specified video file."""
         video_path = Path(video_path)
         if not video_path.exists():
@@ -143,9 +158,16 @@ class VehicleTrackingPipeline:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         duration = total_frames / fps if fps > 0 else 0.0
+        cap.release()
+
+        effective_stride = self.stride if self.stride is not None else (2 if fps >= 24.0 else 1)
+        do_write_video = self.write_video if write_video is None else write_video
 
         logger.info(
             f"Processing video: {video_path} ({width}x{height} @ {fps:.1f} FPS, {total_frames} frames, {duration:.2f}s)"
+        )
+        logger.info(
+            f"Pass 1 Config: imgsz={self.imgsz}, vid_stride={effective_stride}, half={self.half}, write_video={do_write_video}"
         )
 
         crop_selector = BestCropSelector(padding_ratio=0.06, min_size=8)
@@ -154,11 +176,11 @@ class VehicleTrackingPipeline:
         # Track history and frame observations
         tracks_meta: Dict[int, dict] = {}
         frame_observations: Dict[int, List[dict]] = {}
-        frame_idx = 0
 
-        # PASS 1: Stream tracking with GPU acceleration and full resolution
-        # Pass all detections (conf=0.20) into tracker without pre-filtering
-        logger.info(f"Pass 1: Running BoT-SORT tracking at imgsz={self.imgsz} on {self.device_name}...")
+        # PASS 1: Stream tracking with GPU FP16 acceleration and optimal resolution
+        logger.info(
+            f"Pass 1: Running BoT-SORT tracking at imgsz={self.imgsz} (vid_stride={effective_stride}, half={self.half}) on {self.device_name}..."
+        )
         results_generator = self.model.track(
             source=str(video_path),
             tracker=self.tracker_config,
@@ -166,18 +188,18 @@ class VehicleTrackingPipeline:
             conf=self.conf_threshold,
             imgsz=self.imgsz,
             device=self.device,
+            half=self.half,
+            vid_stride=effective_stride,
             show=False,
             stream=True,
             verbose=False,
             persist=True,
         )
 
-        for result in results_generator:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                frame = result.orig_img
-
-            timestamp_sec = frame_idx / fps if fps > 0 else 0.0
+        for step_idx, result in enumerate(results_generator):
+            frame = result.orig_img
+            orig_frame_idx = step_idx * effective_stride
+            timestamp_sec = orig_frame_idx / fps if fps > 0 else 0.0
             current_frame_dets = []
 
             if result.boxes is not None and result.boxes.id is not None:
@@ -209,8 +231,8 @@ class VehicleTrackingPipeline:
                             "id": int(tid),
                             "class_name": class_name,
                             "category": category,
-                            "start_frame": frame_idx,
-                            "end_frame": frame_idx,
+                            "start_frame": orig_frame_idx,
+                            "end_frame": orig_frame_idx,
                             "start_timestamp_sec": timestamp_sec,
                             "end_timestamp_sec": timestamp_sec,
                             "frame_count": 1,
@@ -222,10 +244,12 @@ class VehicleTrackingPipeline:
                             "last_bbox": bbox.tolist(),
                             "first_crop": raw_crop,
                             "last_crop": raw_crop,
-                            "trajectory": [(frame_idx, cx, cy)],
+                            "head_crops": [raw_crop] if raw_crop is not None else [],
+                            "tail_crops": [raw_crop] if raw_crop is not None else [],
+                            "trajectory": [(orig_frame_idx, cx, cy)],
                         }
                     else:
-                        tracks_meta[tid]["end_frame"] = frame_idx
+                        tracks_meta[tid]["end_frame"] = orig_frame_idx
                         tracks_meta[tid]["end_timestamp_sec"] = timestamp_sec
                         tracks_meta[tid]["frame_count"] += 1
                         tracks_meta[tid]["max_conf"] = max(tracks_meta[tid]["max_conf"], float(conf))
@@ -235,14 +259,19 @@ class VehicleTrackingPipeline:
                         tracks_meta[tid]["last_bbox"] = bbox.tolist()
                         if raw_crop is not None:
                             tracks_meta[tid]["last_crop"] = raw_crop
-                        tracks_meta[tid]["trajectory"].append((frame_idx, cx, cy))
+                            if len(tracks_meta[tid]["head_crops"]) < 6:
+                                tracks_meta[tid]["head_crops"].append(raw_crop)
+                            tracks_meta[tid]["tail_crops"].append(raw_crop)
+                            if len(tracks_meta[tid]["tail_crops"]) > 6:
+                                tracks_meta[tid]["tail_crops"].pop(0)
+                        tracks_meta[tid]["trajectory"].append((orig_frame_idx, cx, cy))
 
                     crop_selector.update(
                         track_id=int(tid),
                         frame=frame,
                         bbox=bbox.tolist(),
                         confidence=float(conf),
-                        frame_idx=frame_idx,
+                        frame_idx=orig_frame_idx,
                         timestamp_sec=timestamp_sec,
                     )
 
@@ -256,15 +285,12 @@ class VehicleTrackingPipeline:
                         }
                     )
 
-            frame_observations[frame_idx] = current_frame_dets
-            frame_idx += 1
+            frame_observations[orig_frame_idx] = current_frame_dets
 
-            if frame_idx % 50 == 0 or frame_idx == total_frames:
+            if (orig_frame_idx % (50 * effective_stride) == 0) or orig_frame_idx >= total_frames - effective_stride:
                 logger.info(
-                    f"Tracking Frame {frame_idx:3d}/{total_frames} | Raw Tracks: {len(tracks_meta):2d}"
+                    f"Tracking Frame {orig_frame_idx:3d}/{total_frames} | Raw Tracks: {len(tracks_meta):2d}"
                 )
-
-        cap.release()
 
         # PRE-STITCH TRACK SPLITTING: Split tracks with abrupt class switches or size jumps (> 2.2x)
         tracks_meta, frame_observations, split_audit = split_tracks_on_sudden_jumps(
@@ -298,39 +324,63 @@ class VehicleTrackingPipeline:
 
         logger.info(f"Post-filtering: {len(kept_track_ids)} / {len(tracks_meta)} tracks kept.")
 
-        # PASS 2: Render output video with ONLY kept tracks for pristine visual verification
-        output_video_path = self.output_dir / output_video_name
-        logger.info(f"Pass 2: Writing annotated video to {output_video_path}...")
-        cap = cv2.VideoCapture(str(video_path))
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
+        # PASS 2: Render output video with ONLY kept tracks for pristine visual verification (optional)
+        output_video_path = None
+        if do_write_video:
+            output_video_path = self.output_dir / output_video_name
+            logger.info(f"Pass 2: Writing annotated preview video (max 1280px) to {output_video_path}...")
+            cap = cv2.VideoCapture(str(video_path))
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
-        for f_idx in range(total_frames):
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
+            scale = min(1.0, 1280.0 / width) if width > 1280 else 1.0
+            out_w = int(round(width * scale))
+            out_h = int(round(height * scale))
+            out_w -= (out_w % 2)
+            out_h -= (out_h % 2)
 
-            # Filter frame detections to kept tracks only
-            valid_dets = [d for d in frame_observations.get(f_idx, []) if d["id"] in kept_track_ids]
+            writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (out_w, out_h))
 
-            annotated_frame = annotator.annotate_frame(
-                frame=frame,
-                tracks=valid_dets,
-                frame_idx=f_idx,
-                total_frames=total_frames,
-                fps=fps,
-                total_unique_ids=len(kept_track_ids),
-            )
-            writer.write(annotated_frame)
+            for f_idx in range(total_frames):
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
 
-        cap.release()
-        writer.release()
+                # Filter frame detections to kept tracks only
+                valid_dets = [d for d in frame_observations.get(f_idx, []) if d["id"] in kept_track_ids]
 
-        # Create alias for activa_signal if needed
-        alias_video_path = self.output_dir / "annotated_activa_signal.mp4"
-        if "activa_signal" in video_path.stem and output_video_path != alias_video_path:
-            import shutil
-            shutil.copyfile(str(output_video_path), str(alias_video_path))
+                if scale < 1.0:
+                    frame_to_draw = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                    scaled_dets = []
+                    for d in valid_dets:
+                        d_copy = dict(d)
+                        d_copy["bbox"] = [c * scale for c in d["bbox"]]
+                        scaled_dets.append(d_copy)
+                    dets_to_draw = scaled_dets
+                else:
+                    frame_to_draw = frame
+                    dets_to_draw = valid_dets
+
+                annotated_frame = annotator.annotate_frame(
+                    frame=frame_to_draw,
+                    tracks=dets_to_draw,
+                    frame_idx=f_idx,
+                    total_frames=total_frames,
+                    fps=fps,
+                    total_unique_ids=len(kept_track_ids),
+                )
+                writer.write(annotated_frame)
+
+            cap.release()
+            writer.release()
+            logger.info(f"Pass 2 complete. Video saved: {output_video_path}")
+
+            # Create alias for activa_signal if needed
+            alias_video_path = self.output_dir / "annotated_activa_signal.mp4"
+            if "activa_signal" in video_path.stem and output_video_path != alias_video_path:
+                import shutil
+                shutil.copyfile(str(output_video_path), str(alias_video_path))
+        else:
+            logger.info("Pass 2: Skipped annotated video rendering (write_video=False).")
 
         # Clean existing crops directory
         for f in self.tracks_dir.glob("*.jpg"):
@@ -464,7 +514,7 @@ class VehicleTrackingPipeline:
             "stitched_merges": stitched_pairs,
             "total_raw_tracks": len(tracks_meta),
             "tracked_vehicles_count": len(qualified_tracks),
-            "output_video_path": f"{self.output_dir.as_posix()}/{output_video_name}",
+            "output_video_path": f"{self.output_dir.as_posix()}/{output_video_name}" if do_write_video else None,
             "track_history_path": f"{self.output_dir.as_posix()}/track_history.json",
             "tracks": json_tracks,
         }

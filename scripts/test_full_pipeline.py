@@ -26,7 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from cv_pipeline.crop_extractor import extract_vehicle_crops
+from cv_pipeline.crop_extractor import extract_vehicle_crops, parse_target_ids
 from cv_pipeline.ocr_engine import run_ocr_track
 from cv_pipeline.pipeline import VehicleTrackingPipeline
 from cv_pipeline.plate_detector import run_dual_plate_detection
@@ -132,6 +132,9 @@ def run_stage_1(
     device: str,
     force_fresh: bool = False,
     auto_reuse: bool = False,
+    imgsz: int = 960,
+    stride: Optional[int] = None,
+    write_video: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Execute Stage 1 tracking or load existing tracking if approved."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,15 +164,17 @@ def run_stage_1(
             history = json.load(f)
         return summary, history
 
-    print(f"\n[INFO] Running Stage 1 BoT-SORT Vehicle Tracking on {video_path.name}...")
+    print(f"\n[INFO] Running Stage 1 BoT-SORT Vehicle Tracking on {video_path.name} (imgsz={imgsz}, stride={stride}, write_video={write_video})...")
     pipeline = VehicleTrackingPipeline(
         model_path="yolo26s.pt",
         tracker_config=str(PROJECT_ROOT / "cv_pipeline" / "botsort_reid.yaml"),
         output_dir=str(output_dir),
-        imgsz=1280,
+        imgsz=imgsz,
         min_frames=15,
         conf_threshold=0.20,
         device=device,
+        stride=stride,
+        write_video=write_video,
     )
     video_stem = video_path.stem
     output_video_name = f"{video_stem}_tracked.mp4"
@@ -209,7 +214,7 @@ def display_tracks_table(tracks: List[Dict[str, Any]], max_rows: int = 40):
 def run_stage_2_full(
     video_path: Path,
     track_history: Dict[str, Any],
-    target_id: int,
+    target_id: Union[int, str, List[Any]],
     output_root: Path,
     device: str,
     vlm_provider: str = "auto",
@@ -218,19 +223,29 @@ def run_stage_2_full(
 ) -> Dict[str, Any]:
     """Execute Stage 2.1 through Stage 2.4 + Stage 3 end-to-end for a target vehicle track."""
     t0_stage2 = time.time()
-    track_dir = output_root / f"track_{target_id:03d}"
+    target_ids = parse_target_ids(target_id)
+    primary_id = target_ids[0]
+    is_merged = len(target_ids) > 1
 
+    if is_merged:
+        track_folder_name = f"track_{'_'.join(f'{tid:03d}' for tid in target_ids)}"
+    else:
+        track_folder_name = f"track_{primary_id:03d}"
+
+    track_dir = output_root / track_folder_name
+
+    target_desc = f"{target_ids} (Merged Single Vehicle)" if is_merged else f"{primary_id:03d}"
     print("\n" + "=" * 80)
-    print(f"  EXECUTING FULL STAGE 2 & STAGE 3 FOR TRACK {target_id:03d}")
+    print(f"  EXECUTING FULL STAGE 2 & STAGE 3 FOR TRACK {target_desc}")
     print(f"  Target Track Directory: {track_dir}")
     print("=" * 80)
 
     # Stage 2.1: Extract lossless vehicle crops
-    print(f"[Stage 2.1] Extracting vehicle crops for Track {target_id}...")
+    print(f"[Stage 2.1] Extracting vehicle crops for Track {target_desc}...")
     manifest = extract_vehicle_crops(
         video_path=video_path,
         track_history=track_history,
-        target_id=target_id,
+        target_id=target_ids,
         output_dir=output_root,
         padding_pct=0.08,
     )
@@ -264,7 +279,7 @@ def run_stage_2_full(
             vehicle_attributes = run_stage3_vehicle_attributes(
                 track_dir=track_dir,
                 coarse_class=coarse_cls,
-                track_id=target_id,
+                track_id=primary_id,
                 top_k=3,
             )
         except Exception as e:
@@ -272,7 +287,9 @@ def run_stage_2_full(
 
     elapsed_s2 = round(time.time() - t0_stage2, 2)
     return {
-        "track_id": target_id,
+        "track_id": primary_id,
+        "merged_track_ids": target_ids,
+        "is_merged_track": is_merged,
         "track_dir": track_dir,
         "elapsed_seconds": elapsed_s2,
         "crop_manifest": manifest,
@@ -330,6 +347,8 @@ def get_clearest_crop_path(track_dir: Path, ocr_result: Dict[str, Any]) -> Optio
 def print_forensic_report(s2_res: Dict[str, Any]):
     """Print complete forensic terminal report with slot table and ghost predictions."""
     track_id = s2_res["track_id"]
+    is_merged = s2_res.get("is_merged_track", False)
+    merged_ids = s2_res.get("merged_track_ids", [track_id])
     track_dir = s2_res["track_dir"]
     elapsed = s2_res["elapsed_seconds"]
     ocr_res = s2_res["ocr_result"]
@@ -347,9 +366,17 @@ def print_forensic_report(s2_res: Dict[str, Any]):
     provider = vlm_res.get("provider_used", "none")
     model = vlm_res.get("model_used", "none")
 
+    target_header = (
+        f"TRACK {track_id:03d} (Merged IDs: {', '.join(str(i) for i in merged_ids)})"
+        if is_merged
+        else f"TRACK {track_id:03d}"
+    )
+
     print("\n" + "=" * 95)
-    print(f"  FORENSIC LICENSE PLATE RECONSTRUCTION REPORT | TRACK {track_id:03d}")
+    print(f"  FORENSIC LICENSE PLATE RECONSTRUCTION REPORT | {target_header}")
     print("=" * 95)
+    if is_merged:
+        print(f"  Target Vehicle: Track #{track_id} (Merged IDs: {', '.join(str(i) for i in merged_ids)} — treated as single vehicle)")
     print(f"  Hard Reconciled Plate (`final_plate`):  {final_plate}")
     print(f"  Overall Confidence:                    {overall_conf:.4f}")
     print(f"  Valid Indian RTO State Code:           {state_valid}")
@@ -468,9 +495,26 @@ def parse_args():
     )
     parser.add_argument(
         "--track-id",
+        type=str,
+        default=None,
+        help="Target Track ID or comma-separated IDs (e.g. 26 or '26, 64') to test directly.",
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=960,
+        help="YOLO inference resolution (default: 960).",
+    )
+    parser.add_argument(
+        "--stride",
         type=int,
         default=None,
-        help="Target Track ID to test directly (bypasses track selection).",
+        help="Frame stride for video tracking (default: auto 2 for >=24 FPS, 1 otherwise).",
+    )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Skip writing annotated tracking video (Pass 2) for maximum speed.",
     )
     parser.add_argument(
         "--device",
@@ -546,6 +590,9 @@ def main():
             device=args.device,
             force_fresh=args.fresh,
             auto_reuse=args.reuse_tracking,
+            imgsz=args.imgsz,
+            stride=args.stride,
+            write_video=not args.no_video,
         )
 
         tracks = summary.get("tracks", [])
@@ -559,7 +606,12 @@ def main():
         available_ids = {int(t["id"]): t for t in tracks}
 
         # Track selection loop for current video
-        current_target_id = args.track_id
+        current_target_id = (
+            parse_target_ids(args.track_id) if args.track_id is not None else None
+        )
+        if current_target_id is not None and len(current_target_id) == 1:
+            current_target_id = current_target_id[0]
+
         while True:
             display_tracks_table(tracks)
 
@@ -570,7 +622,7 @@ def main():
                 print("  [q] Quit tester\n")
 
                 try:
-                    user_inp = input("Enter Track ID to trace: ").strip().lower()
+                    user_inp = input("Enter Track ID (or comma-separated IDs e.g. 26, 64) to trace: ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     print("\nExiting.")
                     return
@@ -587,15 +639,17 @@ def main():
                     else:
                         print("[WARN] Annotated video path not found.")
                     continue
-                elif user_inp.isdigit():
-                    tid = int(user_inp)
-                    if tid not in available_ids:
-                        print(f"[ERROR] Track ID {tid} not in detected tracks list.")
-                        continue
-                    current_target_id = tid
                 else:
-                    print("Invalid input. Please enter a valid Track ID, 'v', 'b', or 'q'.")
-                    continue
+                    try:
+                        parsed = parse_target_ids(user_inp)
+                        invalid = [t for t in parsed if t not in available_ids]
+                        if invalid:
+                            print(f"[ERROR] Track ID(s) {invalid} not in detected tracks list. Available IDs: {sorted(available_ids.keys())}")
+                            continue
+                        current_target_id = parsed if len(parsed) > 1 else parsed[0]
+                    except Exception:
+                        print("Invalid input. Please enter valid Track ID(s), 'v', 'b', or 'q'.")
+                        continue
 
             # Run full Stage 2 on current_target_id
             try:
@@ -637,7 +691,7 @@ def main():
             # Fast loop prompt
             try:
                 loop_inp = input(
-                    f"\nTrace another track from '{clip_stem}'? Enter Track ID, [b] change video, or [q] quit: "
+                    f"\nTrace another track from '{clip_stem}'? Enter Track ID(s), [b] change video, or [q] quit: "
                 ).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting.")
@@ -648,8 +702,14 @@ def main():
                 return
             elif loop_inp == "b":
                 break
-            elif loop_inp.isdigit() and int(loop_inp) in available_ids:
-                current_target_id = int(loop_inp)
+            else:
+                try:
+                    parsed = parse_target_ids(loop_inp)
+                    invalid = [t for t in parsed if t not in available_ids]
+                    if not invalid:
+                        current_target_id = parsed if len(parsed) > 1 else parsed[0]
+                except Exception:
+                    pass
             # Else loop will reprint table and prompt
 
         if args.video:

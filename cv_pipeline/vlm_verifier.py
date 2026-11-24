@@ -684,6 +684,9 @@ def reconcile_vlm_with_ocr(
         return {
             "schema_version": "2.4.0",
             "track_id": ocr_result.get("track_id", "unknown"),
+            "target_id": ocr_result.get("target_id", ocr_result.get("track_id", "unknown")),
+            "merged_track_ids": ocr_result.get("merged_track_ids", [ocr_result.get("track_id")]),
+            "is_merged_track": bool(ocr_result.get("is_merged_track", False)),
             "vlm_status": "FALLBACK_TO_OCR",
             "provider_used": "none",
             "model_used": "none",
@@ -930,6 +933,9 @@ def reconcile_vlm_with_ocr(
     return {
         "schema_version": "2.4.0",
         "track_id": ocr_result.get("track_id", "unknown"),
+        "target_id": ocr_result.get("target_id", ocr_result.get("track_id", "unknown")),
+        "merged_track_ids": ocr_result.get("merged_track_ids", [ocr_result.get("track_id")]),
+        "is_merged_track": bool(ocr_result.get("is_merged_track", False)),
         "vlm_status": "SUCCESS",
         "provider_used": provider_used or "unknown",
         "model_used": model_used or "unknown",
