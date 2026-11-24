@@ -30,6 +30,7 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from cv_pipeline.api_keys import get_nvidia_api_keys
 from cv_pipeline.ocr_engine import (
     _SLOT_TYPES_CORRECT,
     _VALID_STATE_CODES,
@@ -367,12 +368,17 @@ class VLMClient:
     def _call_nvidia(
         self,
         messages: List[Dict[str, Any]],
+        api_key: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str, float]:
         """Tier 2: NVIDIA Build NIM nvidia/nemotron-3.5-super-vl-120b-a12b."""
-        if not self.nvidia_api_key:
+        effective_key = api_key or self.nvidia_api_key
+        if not effective_key:
+            keys = get_nvidia_api_keys()
+            effective_key = keys[0][1] if keys else None
+        if not effective_key:
             raise ValueError("NVIDIA_API_KEY is not set.")
 
-        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=self.nvidia_api_key, max_retries=0)
+        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=effective_key, max_retries=0)
         start_t = time.time()
 
         resp = client.chat.completions.create(
@@ -465,15 +471,47 @@ class VLMClient:
                     "latency_sec": 0.0,
                 })
                 continue
-            if prov_name == "nvidia" and not self.nvidia_api_key:
-                fallback_trace.append({
-                    "tier": tier_num,
-                    "provider": prov_name,
-                    "model": NVIDIA_MODEL,
-                    "status": "SKIPPED",
-                    "error": "NVIDIA_API_KEY missing",
-                    "latency_sec": 0.0,
-                })
+            if prov_name == "nvidia":
+                nv_keys = get_nvidia_api_keys()
+                if self.nvidia_api_key and not any(k[1] == self.nvidia_api_key for k in nv_keys):
+                    nv_keys.insert(0, ("NVIDIA_API_KEY", self.nvidia_api_key))
+
+                if not nv_keys:
+                    fallback_trace.append({
+                        "tier": tier_num,
+                        "provider": "nvidia",
+                        "model": NVIDIA_MODEL,
+                        "status": "SKIPPED",
+                        "error": "NVIDIA_API_KEY missing",
+                        "latency_sec": 0.0,
+                    })
+                    continue
+
+                for key_label, secret_val in nv_keys:
+                    prov_label = f"nvidia[{key_label}]"
+                    try:
+                        parsed_json, model_used, latency = self._call_nvidia(messages, api_key=secret_val)
+                        fallback_trace.append({
+                            "tier": tier_num,
+                            "provider": prov_label,
+                            "model": model_used,
+                            "status": "SUCCESS",
+                            "error": None,
+                            "latency_sec": round(latency, 3),
+                        })
+                        logger.info(f"VLM call succeeded with {prov_label} ({model_used}) in {latency:.2f}s")
+                        return parsed_json, prov_label, model_used, latency, fallback_trace
+                    except Exception as e:
+                        err_msg = str(e)
+                        fallback_trace.append({
+                            "tier": tier_num,
+                            "provider": prov_label,
+                            "model": getattr(e, "model", NVIDIA_MODEL),
+                            "status": "FAILED",
+                            "error": err_msg,
+                            "latency_sec": 0.0,
+                        })
+                        logger.warning(f"VLM Tier {tier_num} ({prov_label}) failed: {err_msg}")
                 continue
 
             try:

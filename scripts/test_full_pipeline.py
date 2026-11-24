@@ -30,6 +30,7 @@ from cv_pipeline.crop_extractor import extract_vehicle_crops
 from cv_pipeline.ocr_engine import run_ocr_track
 from cv_pipeline.pipeline import VehicleTrackingPipeline
 from cv_pipeline.plate_detector import run_dual_plate_detection
+from cv_pipeline.vehicle_crop_selector import run_stage3_vehicle_attributes
 from cv_pipeline.vlm_verifier import verify_track_vlm
 
 logging.basicConfig(
@@ -213,13 +214,14 @@ def run_stage_2_full(
     device: str,
     vlm_provider: str = "auto",
     skip_vlm: bool = False,
+    skip_attributes: bool = False,
 ) -> Dict[str, Any]:
-    """Execute Stage 2.1 through Stage 2.4 end-to-end for a target vehicle track."""
+    """Execute Stage 2.1 through Stage 2.4 + Stage 3 end-to-end for a target vehicle track."""
     t0_stage2 = time.time()
     track_dir = output_root / f"track_{target_id:03d}"
 
     print("\n" + "=" * 80)
-    print(f"  EXECUTING FULL STAGE 2 (2.1 -> 2.4) FOR TRACK {target_id:03d}")
+    print(f"  EXECUTING FULL STAGE 2 & STAGE 3 FOR TRACK {target_id:03d}")
     print(f"  Target Track Directory: {track_dir}")
     print("=" * 80)
 
@@ -253,6 +255,21 @@ def run_stage_2_full(
         print(f"[Stage 2.4] Running blind multi-tier VLM verification (provider={vlm_provider})...")
         vlm_result = verify_track_vlm(track_dir=track_dir, provider=vlm_provider)
 
+    # Stage 3: Vehicle Attribute Extraction (Top-3 sharpest vehicle crops)
+    vehicle_attributes = None
+    if not skip_attributes:
+        print("[Stage 3] Running vehicle attribute extraction (Top-3 sharpest crops)...")
+        coarse_cls = manifest.get("class_name") or manifest.get("category")
+        try:
+            vehicle_attributes = run_stage3_vehicle_attributes(
+                track_dir=track_dir,
+                coarse_class=coarse_cls,
+                track_id=target_id,
+                top_k=3,
+            )
+        except Exception as e:
+            logger.error(f"Stage 3 vehicle attribute extraction failed: {e}")
+
     elapsed_s2 = round(time.time() - t0_stage2, 2)
     return {
         "track_id": target_id,
@@ -261,6 +278,7 @@ def run_stage_2_full(
         "crop_manifest": manifest,
         "ocr_result": ocr_result,
         "vlm_result": vlm_result,
+        "vehicle_attributes": vehicle_attributes,
     }
 
 
@@ -396,14 +414,45 @@ def print_forensic_report(s2_res: Dict[str, Any]):
             print(f"  {r:<4} | {p:<12} | {sc:<10.3f} | {str(vr):<9} | {g_slots}")
         print("=" * 95)
 
+    # Stage 3 Vehicle Intelligence
+    vehicle_attrs = s2_res.get("vehicle_attributes")
+    if vehicle_attrs:
+        attrs = vehicle_attrs.get("attributes", {})
+        b_type = attrs.get("body_type", "Unknown")
+        b_conf = attrs.get("body_type_conf", 0.0)
+        colour = attrs.get("colour", "Unknown")
+        c_conf = attrs.get("colour_conf", 0.0)
+        make = attrs.get("make", "Unknown")
+        m_conf = attrs.get("make_conf", 0.0)
+        v_model = attrs.get("model", "Unknown")
+        mod_conf = attrs.get("model_conf", 0.0)
+        v_prov = vehicle_attrs.get("provider", "none")
+        v_model_used = vehicle_attrs.get("model_used", "none")
+        crop_names = vehicle_attrs.get("selected_crop_names", [])
+
+        print("\n" + "=" * 95)
+        print(f"  STAGE 3 VEHICLE INTELLIGENCE & ATTRIBUTES | TRACK {track_id:03d}")
+        print("=" * 95)
+        print(f"  Body Type:      {b_type:<15} (confidence: {b_conf:.2f})")
+        print(f"  Colour:         {colour:<15} (confidence: {c_conf:.2f})")
+        print(f"  Make:           {make:<15} (confidence: {m_conf:.2f})")
+        print(f"  Model:          {v_model:<15} (confidence: {mod_conf:.2f})")
+        print(f"  Provider/Model: {v_prov} ({v_model_used})")
+        if crop_names:
+            print(f"  Selected Crops: {', '.join(crop_names)}")
+        print("=" * 95)
+
     # Asset paths
     grid_path = track_dir / "vlm_evidence_unenhanced_grid.png"
     clearest_path = get_clearest_crop_path(track_dir, ocr_res)
+    contact_strip_path = track_dir / "stage3_vehicle_crops_top3.png"
     print("\n  Forensic Visual Assets:")
     if clearest_path and clearest_path.is_file():
-        print(f"  -> Clearest Plate Image: {clearest_path.resolve()}")
+        print(f"  -> Clearest Plate Image:        {clearest_path.resolve()}")
     if grid_path.is_file():
-        print(f"  -> 2x2 Evidence Grid:   {grid_path.resolve()}")
+        print(f"  -> 2x2 Plate Evidence Grid:     {grid_path.resolve()}")
+    if contact_strip_path.is_file():
+        print(f"  -> 1x3 Vehicle Contact Strip:   {contact_strip_path.resolve()}")
     print("=" * 95)
 
 
@@ -440,6 +489,11 @@ def parse_args():
         "--skip-vlm",
         action="store_true",
         help="Skip Stage 2.4 VLM and evaluate Stage 2.3 OCR only.",
+    )
+    parser.add_argument(
+        "--skip-attributes",
+        action="store_true",
+        help="Skip Stage 3 vehicle attribute extraction.",
     )
     parser.add_argument(
         "--reuse-tracking",
@@ -553,6 +607,7 @@ def main():
                     device=args.device,
                     vlm_provider=args.provider,
                     skip_vlm=args.skip_vlm,
+                    skip_attributes=args.skip_attributes,
                 )
 
                 # Print forensic report

@@ -29,6 +29,7 @@ build/
 *.mov
 *.mkv
 data/clips/
+data/Final/
 
 # Output Directories & Generated Visuals
 outputs/

@@ -348,22 +348,44 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
 
 ---
 
-### 2026-11-24 04:50:00 IST — Top-Level `final_plate` Key, Ghost Stack Pruning Floor (`0.05`), & Interactive Full-Stack Tester (`scripts/test_full_pipeline.py`)
-- **1. Standardize Top-Level Plate Key (`cv_pipeline/vlm_verifier.py`)**:
-  - Explicitly added `"final_plate"` alongside `"reconciled_plate"` across both `SUCCESS` and `FALLBACK_TO_OCR` returns.
-  - Preserved `"reconciled_plate"` for backward compatibility across all existing callers and tests.
-- **2. Lower `ghost_stack` Pruning Floor to `0.05`**:
-  - Reduced soft-score cutoff from `0.12` to `0.05` so single-pipeline OCR candidates (weighted by $0.25-0.30$, e.g. $\sim 0.06-0.09$) survive in `ghost_stack`.
-  - On `simple_traffic_30s` Track 2, confirmed slot 0 retains `'K'` ($0.069$) alongside `'M'` ($0.474$), and slot 9 retains `'2'` ($0.091$) alongside `'4'` ($0.406$).
-  - Updated `tests/test_vlm_verifier.py` to assert `"final_plate"` is non-null and that low-score single-pipeline OCR candidates survive.
-- **3. Interactive Full-Stack Tester (`scripts/test_full_pipeline.py`)**:
-  - Built an interactive CLI tool testing Stage 1 (BoT-SORT vehicle tracking) and full Stage 2 (2.1 vehicle crop extraction $\to$ 2.2 dual-detector plate localization & readability scoring $\to$ 2.3 RapidOCR + PARSeq dual-pipeline OCR $\to$ 2.4 blind multi-tier VLM triple-check).
-  - Isolates all runs into `test_outputs/<clip_stem>/` without touching `outputs/` (added `test_outputs/` to `.gitignore`).
-  - Added robust fallback path resolution in `cv_pipeline/ocr_engine.py` and `cv_pipeline/vlm_verifier.py` to seamlessly handle arbitrary output directory nesting.
-  - Includes interactive video selector scanning `data/Final` (10 videos), Stage 1 tracking caching/reuse, compact track selection table, option `[v]` to launch annotated video, full Stage 2 execution, terminal forensic report with Top-3 ghost predictions, and automatic OS image viewer launch of the clearest unenhanced plate crop.
-- **4. Verification & PyTorch Device Fix**:
-  - Fixed `torch.cuda.get_device_name` in `cv_pipeline/pipeline.py` to handle string `"0"` via integer index conversion.
-  - End-to-end verification run on `activa_signal.mp4` Track 27 inside `test_outputs/activa_signal/track_027` succeeded with full forensic table and clearest crop image generated.
-  - Full test suite: **77/77 tests passing ($100\%$)**.
+
+---
+
+### 2026-11-24 05:55:00 IST — Multi-Key NVIDIA NIM Failover Pool, Stage 3 Vehicle Intelligence Integration, & Contact Strip Generator
+- **1. Shared Multi-Key NVIDIA NIM Pool (`cv_pipeline/api_keys.py`)**:
+  - Created lightweight helper `get_nvidia_api_keys() -> List[Tuple[str, str]]`.
+  - Priority ordering: `NVIDIA_API_KEY`, `NVIDIA_API_KEY_1`, `NVIDIA_API_KEY_2`, ..., `NVIDIA_API_KEY_N`.
+  - Deduplicates by secret value while preserving the highest-priority key label.
+  - Zero raw token leakage: returns `(key_label, secret_value)` pairs so audit traces and logs strictly record `key_label`.
+- **2. Stage 2.4 Multi-Key Failover (`cv_pipeline/vlm_verifier.py`)**:
+  - Updated `_call_nvidia(messages, api_key=...)` with `max_retries=0`.
+  - Upgraded `execute_blind_query`: cycles sequentially through all available NVIDIA NIM keys on HTTP 401/402/403/429/5xx, timeout, or parse failure before falling back to Tier 3 (Ollama).
+  - Records exact key attempt in `fallback_trace` as `provider: "nvidia[<KEY_LABEL>]"` and returns `provider_used: "nvidia[<KEY_LABEL>]"`.
+- **3. Stage 3 Multi-Key Integration (`backend/opensource_extractor.py`)**:
+  - Upgraded Tier 1 Primary (NVIDIA NIM) in `extract_vehicle_attributes_with_meta` to cycle through all keys returned by `get_nvidia_api_keys()`.
+  - On success, sets `provider = f"nvidia[{key_label}]"`.
+  - Aggregates individual key errors into a unified `tier_1_err` string, preserving the exact `len(tier_errors) == 3` outage contract.
+  - Fully backward compatible with `extract_vehicle_attributes` and all API endpoints.
+- **4. Top-3 Sharpest Vehicle Crop Selector & Contact Strip Generator (`cv_pipeline/vehicle_crop_selector.py`)**:
+  - Implemented `select_top_vehicle_crops(track_dir, top_k=3)` using composite quality scoring:
+    $$\text{score} = \sqrt{\text{area}} \cdot \ln(1 + \text{lap\_var})$$
+  - Applies 3-bucket temporal diversity (early, middle, late track lifetime) when $>6$ crops exist.
+  - Built `build_vehicle_crops_contact_strip` stitching a 1xK visual contact strip (`stage3_vehicle_crops_top3.png`) with header metadata.
+  - Implemented `run_stage3_vehicle_attributes`: orchestrates crop selection, contact strip building, Stage 3 VLM extraction, and persistence to `vehicle_attributes.json`.
+- **5. Interactive Full-Stack Pipeline Tester Upgrade (`scripts/test_full_pipeline.py`)**:
+  - Wired Stage 3 attribute extraction automatically after Stage 2.4.
+  - Added CLI flag `--skip-attributes`.
+  - Upgraded terminal report to display both License Plate reconstruction and Stage 3 Vehicle Intelligence (Body Type, Colour, Make, Model, Confidences, Provider/Key Label, and Selected Crops).
+  - Surfaces visual asset paths for both clearest plate crop and 1x3 vehicle contact strip.
+- **6. Comprehensive Unit Testing & Full Pipeline Verification**:
+  - Created `tests/test_multi_key_and_stage3.py` covering key ordering/deduplication, VLM verifier multi-key failover, opensource extractor multi-key failover, and crop quality scoring / contact strip generation.
+  - All **68/68 unit tests passing ($100\%$)** via `python -m pytest tests/`.
+  - Verified `scripts/test_opensource_extractor.py` (all 8 sections passing) and `scripts/test_matcher.py` (all 5 tests passing).
+  - Executed end-to-end smoke test on `data/clips/activa_signal.mp4` Track 27:
+    - Hard Reconciled Plate: `UP15BE5580` (`valid_state_code: True`)
+    - Vehicle Intelligence: `two-wheeler (0.98), white (0.95), Honda (0.85), Activa (0.80)`
+    - Latency: 2.14s via `nvidia[NVIDIA_API_KEY]`.
+  - Added `data/Final/` to `.gitignore`.
+
 
 

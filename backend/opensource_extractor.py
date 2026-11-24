@@ -54,6 +54,8 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from PIL import Image
 
+from cv_pipeline.api_keys import get_nvidia_api_keys
+
 # Ensure environment variables from .env are loaded
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -519,54 +521,64 @@ def extract_vehicle_attributes_with_meta(
     messages = [{"role": "user", "content": user_content}]
 
     # Tier 1: Primary (NVIDIA NIM)
-    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if nvidia_key:
+    nvidia_keys = get_nvidia_api_keys()
+    env_nv_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    if env_nv_key and not any(k[1] == env_nv_key for k in nvidia_keys):
+        nvidia_keys.insert(0, ("NVIDIA_API_KEY", env_nv_key))
+
+    if nvidia_keys:
         model_name = "nvidia/nemotron-3.5-super-vl-120b-a12b"
-        t0 = time.perf_counter()
-        try:
-            logger.info(f"Querying Tier 1 Primary (NVIDIA NIM - {model_name}) with {len(b64_images)} crop(s)...")
-            client = OpenAI(
-                base_url="https://integrate.api.nvidia.com/v1",
-                api_key=nvidia_key,
-                timeout=25.0,
-                max_retries=0,
-            )
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                extra_body={"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}},
-                temperature=0.0,
-                max_tokens=300,
-                timeout=25.0,
-            )
-            raw_content = resp.choices[0].message.content or ""
-            parsed = _clean_and_parse_json(raw_content)
-            attrs = _normalize_and_validate(parsed)
-            latency = round(time.perf_counter() - t0, 3)
-            logger.info(
-                f"Tier 1 (NVIDIA NIM - {model_name}) succeeded in {latency}s: "
-                f"{attrs.make} {attrs.model} ({attrs.colour} {attrs.body_type})"
-            )
-            return ExtractedVehicleAttributesWithMeta(
-                body_type=attrs.body_type,
-                body_type_conf=attrs.body_type_conf,
-                colour=attrs.colour,
-                colour_conf=attrs.colour_conf,
-                make=attrs.make,
-                make_conf=attrs.make_conf,
-                model=attrs.model,
-                model_conf=attrs.model_conf,
-                provider="nvidia",
-                model_used=model_name,
-                latency_sec=latency,
-            )
-        except Exception as e:
-            elapsed = round(time.perf_counter() - t0, 3)
-            tier_1_err = f"{type(e).__name__}: {e} (after {elapsed}s)"
-            logger.warning(
-                f"Tier 1 (NVIDIA NIM - {model_name}) failed after {elapsed}s: {e}. "
-                f"Falling back to Tier 2."
-            )
+        t1_errs = []
+        for key_label, secret_val in nvidia_keys:
+            t0 = time.perf_counter()
+            try:
+                logger.info(f"Querying Tier 1 Primary (NVIDIA NIM [{key_label}] - {model_name}) with {len(b64_images)} crop(s)...")
+                client = OpenAI(
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    api_key=secret_val,
+                    timeout=25.0,
+                    max_retries=0,
+                )
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    extra_body={"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}},
+                    temperature=0.0,
+                    max_tokens=300,
+                    timeout=25.0,
+                )
+                raw_content = resp.choices[0].message.content or ""
+                parsed = _clean_and_parse_json(raw_content)
+                attrs = _normalize_and_validate(parsed)
+                latency = round(time.perf_counter() - t0, 3)
+                logger.info(
+                    f"Tier 1 (NVIDIA NIM [{key_label}] - {model_name}) succeeded in {latency}s: "
+                    f"{attrs.make} {attrs.model} ({attrs.colour} {attrs.body_type})"
+                )
+                return ExtractedVehicleAttributesWithMeta(
+                    body_type=attrs.body_type,
+                    body_type_conf=attrs.body_type_conf,
+                    colour=attrs.colour,
+                    colour_conf=attrs.colour_conf,
+                    make=attrs.make,
+                    make_conf=attrs.make_conf,
+                    model=attrs.model,
+                    model_conf=attrs.model_conf,
+                    provider=f"nvidia[{key_label}]",
+                    model_used=model_name,
+                    latency_sec=latency,
+                )
+            except Exception as e:
+                elapsed = round(time.perf_counter() - t0, 3)
+                t1_errs.append(f"[{key_label}] {type(e).__name__}: {e} (after {elapsed}s)")
+                logger.warning(
+                    f"Tier 1 key {key_label} (NVIDIA NIM - {model_name}) failed after {elapsed}s: {e}."
+                )
+        tier_1_err = " | ".join(t1_errs)
+        logger.warning(
+            f"All Tier 1 NVIDIA NIM keys failed ({tier_1_err}). "
+            f"Falling back to Tier 2."
+        )
     else:
         tier_1_err = "NVIDIA_API_KEY not configured"
         logger.info("NVIDIA_API_KEY not set. Skipping Tier 1 and proceeding to Tier 2.")
