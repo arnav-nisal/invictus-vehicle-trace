@@ -193,3 +193,71 @@ def test_select_top_vehicle_crops():
         assert img_strip is not None
         assert img_strip.shape[0] == 320  # Default target_height
         assert img_strip.shape[1] > 100
+
+
+def test_vlm_verifier_auto_hierarchy():
+    """Verify that auto mode executes Tier 1 (NVIDIA), then Tier 2 (Groq), then Tier 3 (Ollama)."""
+    env_mock = {
+        "NVIDIA_API_KEY": "nv_key",
+        "GROQ_API_KEY": "groq_key",
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=json.dumps({
+                    "plate_length": 10,
+                    "characters": [
+                        {"slot_idx": i, "char": "A", "confidence": 0.9, "legible": True, "note": ""}
+                        for i in range(10)
+                    ],
+                    "layout": "single_line",
+                    "overall_visual_clarity": "clear",
+                })
+            )
+        )
+    ]
+
+    with patch.dict(os.environ, env_mock, clear=True):
+        client = VLMClient()
+
+        # Case 1: Tier 1 (NVIDIA) succeeds directly
+        with patch("cv_pipeline.vlm_verifier.OpenAI") as mock_openai_cls:
+            mock_client_nv = MagicMock()
+            mock_client_nv.chat.completions.create.return_value = mock_resp
+            mock_openai_cls.return_value = mock_client_nv
+
+            parsed, prov_used, model_used, lat, trace = client.execute_blind_query(
+                unenh_b64="fake_u", enh_b64="fake_e", plate_len=10, provider="auto"
+            )
+
+            assert parsed is not None
+            assert "nvidia" in prov_used
+            assert trace[0]["tier"] == 1
+            assert "nvidia" in trace[0]["provider"]
+            assert trace[0]["status"] == "SUCCESS"
+
+        # Case 2: Tier 1 (NVIDIA) fails -> falls back to Tier 2 (Groq)
+        with patch("cv_pipeline.vlm_verifier.OpenAI") as mock_openai_cls:
+            mock_client_nv = MagicMock()
+            mock_client_nv.chat.completions.create.side_effect = Exception("NVIDIA 500 error")
+
+            mock_client_groq = MagicMock()
+            mock_client_groq.chat.completions.create.return_value = mock_resp
+
+            mock_openai_cls.side_effect = [mock_client_nv, mock_client_groq]
+
+            parsed, prov_used, model_used, lat, trace = client.execute_blind_query(
+                unenh_b64="fake_u", enh_b64="fake_e", plate_len=10, provider="auto"
+            )
+
+            assert parsed is not None
+            assert prov_used == "groq"
+            assert trace[0]["tier"] == 1
+            assert "nvidia" in trace[0]["provider"]
+            assert trace[0]["status"] == "FAILED"
+            assert trace[1]["tier"] == 2
+            assert trace[1]["provider"] == "groq"
+            assert trace[1]["status"] == "SUCCESS"
+

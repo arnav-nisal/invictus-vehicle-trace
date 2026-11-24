@@ -439,7 +439,14 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - All **75/75 unit tests passing ($100\%$)** across the test suite in 7.34s.
   - Re-benchmarked fresh on `data/Final/file_07.mp4`: execution completed in ~20s with verified continuous, non-flickering bounding boxes across consecutive frames 0..9 in `track_history.json`.
 
-
-
-
+### 2026-11-24 07:15:00 IST — Stage 2.4 VLM Hierarchy Update (Nemotron Primary with Multi-Key Failover)
+- **1. Re-Ordered Provider Hierarchy (`cv_pipeline/vlm_verifier.py`)**:
+  - Re-ordered default `"auto"` fallback chain to prioritize NVIDIA NIM:
+    - **Tier 1 (Primary)**: NVIDIA Build NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`), automatically cycling across all available keys (`NVIDIA_API_KEY`, `NVIDIA_API_KEY_1`, `NVIDIA_API_KEY_2`, etc.) sequentially on rate limits or API errors.
+    - **Tier 2 (Secondary)**: Groq Cloud (`qwen/qwen3.8-27b`) as secondary cloud failover.
+    - **Tier 3 (Local Fallback)**: Offline Ollama (`qwen3-vl:4b-instruct` / `qwen3-vl:2b-instruct`) as zero-network local fallback.
+  - Updated single-provider mappings and docstrings to match the new tier enumeration.
+- **2. Unit Test Verification**:
+  - Added `test_vlm_verifier_auto_hierarchy` in `tests/test_multi_key_and_stage3.py`, validating that `"auto"` mode executes Tier 1 (NVIDIA) first, and only cascades to Tier 2 (Groq) and Tier 3 (Ollama) if all NVIDIA keys fail.
+  - All **76/76 unit tests passing ($100\%$)** across the test suite in 7.30s.
 

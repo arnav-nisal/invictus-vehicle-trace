@@ -1,8 +1,8 @@
 """Stage 2.4 — Blind Multi-Tier VLM Triple-Check & Slot-by-Slot Tie-Breaker.
 
 3-Tier OpenAI-compatible fallback chain:
-  Tier 1 — Groq (qwen/qwen3.8-27b)
-  Tier 2 — NVIDIA Build NIM (nvidia/nemotron-3.5-super-vl-120b-a12b)
+  Tier 1 — NVIDIA Build NIM (nvidia/nemotron-3.5-super-vl-120b-a12b) with multi-key failover
+  Tier 2 — Groq (qwen/qwen3.8-27b)
   Tier 3 — Ollama local (qwen3-vl:4b-instruct / qwen3-vl:2b-instruct)
 
 Visual evidence: 2x2 labeled stitched grids (unenhanced & enhanced) from Stage 2.3 evidence pack.
@@ -328,7 +328,7 @@ class VLMClient:
         self,
         messages: List[Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], str, float]:
-        """Tier 1: Groq qwen/qwen3.8-27b."""
+        """Tier 2: Groq qwen/qwen3.8-27b."""
         if not self.groq_api_key:
             raise ValueError("GROQ_API_KEY is not set.")
 
@@ -370,7 +370,7 @@ class VLMClient:
         messages: List[Dict[str, Any]],
         api_key: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str, float]:
-        """Tier 2: NVIDIA Build NIM nvidia/nemotron-3.5-super-vl-120b-a12b."""
+        """Tier 1: NVIDIA Build NIM nvidia/nemotron-3.5-super-vl-120b-a12b."""
         effective_key = api_key or self.nvidia_api_key
         if not effective_key:
             keys = get_nvidia_api_keys()
@@ -446,14 +446,14 @@ class VLMClient:
         provider_norm = provider.lower().strip()
         if provider_norm == "auto":
             tiers = [
-                (1, "groq", self._call_groq),
-                (2, "nvidia", self._call_nvidia),
+                (1, "nvidia", self._call_nvidia),
+                (2, "groq", self._call_groq),
                 (3, "ollama", self._call_ollama),
             ]
-        elif provider_norm == "groq":
-            tiers = [(1, "groq", self._call_groq)]
         elif provider_norm == "nvidia":
-            tiers = [(2, "nvidia", self._call_nvidia)]
+            tiers = [(1, "nvidia", self._call_nvidia)]
+        elif provider_norm == "groq":
+            tiers = [(2, "groq", self._call_groq)]
         elif provider_norm == "ollama":
             tiers = [(3, "ollama", self._call_ollama)]
         else:
