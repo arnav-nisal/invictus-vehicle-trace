@@ -193,3 +193,89 @@ def test_vlm_verifier_merged_metadata_propagation():
     assert result["track_id"] == 26
     assert result["target_id"] == 26
 
+
+def test_interpolate_track_gaps_midpoint():
+    """Verify vid_stride=2 gap (frame 0 & frame 2) produces exact midpoint at frame 1 tagged 'interpolated': True."""
+    from cv_pipeline.pipeline import interpolate_track_gaps
+
+    track_obs = [
+        {"frame_idx": 0, "bbox": [100.0, 100.0, 200.0, 200.0], "confidence": 0.80, "id": 1, "label": "car"},
+        {"frame_idx": 2, "bbox": [110.0, 120.0, 210.0, 220.0], "confidence": 0.90, "id": 1, "label": "car"},
+    ]
+
+    interpolated = interpolate_track_gaps(track_obs, max_gap_frames=6)
+    assert len(interpolated) == 3
+
+    # Frame 0
+    assert interpolated[0]["frame_idx"] == 0
+    assert interpolated[0]["interpolated"] is False
+    assert interpolated[0]["bbox"] == [100.0, 100.0, 200.0, 200.0]
+
+    # Frame 1 (interpolated midpoint)
+    assert interpolated[1]["frame_idx"] == 1
+    assert interpolated[1]["interpolated"] is True
+    assert interpolated[1]["bbox"] == [105.0, 110.0, 205.0, 210.0]
+    assert interpolated[1]["confidence"] == 0.85
+
+    # Frame 2
+    assert interpolated[2]["frame_idx"] == 2
+    assert interpolated[2]["interpolated"] is False
+    assert interpolated[2]["bbox"] == [110.0, 120.0, 210.0, 220.0]
+
+
+def test_interpolate_track_gaps_large_gap_rejected():
+    """Verify multi-second occlusion gaps (> max_gap_frames) are NOT interpolated."""
+    from cv_pipeline.pipeline import interpolate_track_gaps
+
+    track_obs = [
+        {"frame_idx": 0, "bbox": [100.0, 100.0, 200.0, 200.0], "confidence": 0.80, "id": 1},
+        {"frame_idx": 20, "bbox": [150.0, 150.0, 250.0, 250.0], "confidence": 0.85, "id": 1},
+    ]
+
+    # max_gap_frames = 6 (e.g. vid_stride=2 * 3)
+    interpolated = interpolate_track_gaps(track_obs, max_gap_frames=6)
+    # Since gap is 20 frames (> 6), no intermediate frames should be added
+    assert len(interpolated) == 2
+    assert [o["frame_idx"] for o in interpolated] == [0, 20]
+
+
+def test_crop_extractor_skips_interpolated_frames(tmp_path):
+    """Verify crop_extractor skips 'interpolated': True frames, running Stage 2 crops only on true YOLO boxes."""
+    import cv2
+    video_path = tmp_path / "dummy_interp.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(str(video_path), fourcc, 30.0, (640, 480))
+    for _ in range(10):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        out.write(frame)
+    out.release()
+
+    track_history = {
+        "tracks": {
+            "1": {
+                "class_name": "car",
+                "category": "car",
+                "start_frame": 0,
+                "end_frame": 2,
+                "observations": [
+                    {"frame_idx": 0, "bbox": [50, 50, 150, 150], "confidence": 0.85, "timestamp_sec": 0.0, "timestamp": "00:00:00.000", "interpolated": False},
+                    {"frame_idx": 1, "bbox": [55, 55, 155, 155], "confidence": 0.87, "timestamp_sec": 0.033, "timestamp": "00:00:00.033", "interpolated": True}, # should be skipped!
+                    {"frame_idx": 2, "bbox": [60, 60, 160, 160], "confidence": 0.90, "timestamp_sec": 0.067, "timestamp": "00:00:00.067", "interpolated": False},
+                ],
+            }
+        }
+    }
+
+    manifest = extract_vehicle_crops(
+        video_path=video_path,
+        track_history=track_history,
+        target_id=1,
+        output_dir=tmp_path / "outputs",
+    )
+
+    # Exactly 2 true crops should be saved (frame 0 and frame 2), skipping frame 1
+    assert manifest["total_crops_saved"] == 2
+    saved_frames = [c["frame_idx"] for c in manifest["crops"]]
+    assert saved_frames == [0, 2]
+
+

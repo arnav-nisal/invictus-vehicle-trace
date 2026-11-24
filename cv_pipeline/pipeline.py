@@ -2,8 +2,9 @@
 
 import json
 import logging
+import math
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union, List, Set
 
 import cv2
 import torch
@@ -61,6 +62,140 @@ def make_json_serializable(obj: Any) -> Any:
     if isinstance(obj, (list, tuple, set)):
         return [make_json_serializable(x) for x in obj]
     return obj
+
+
+def interpolate_track_gaps(
+    tracks: Union[Dict[int, List[dict]], Dict[str, Any], List[dict]],
+    max_gap_frames: int = 6,
+    kept_track_ids: Optional[Union[Set[int], List[int]]] = None,
+) -> Any:
+    """Linearly interpolate bounding boxes across small temporal gaps (1 < gap <= max_gap_frames).
+
+    Marks real detections with 'interpolated': False and synthesized frames with 'interpolated': True.
+    Does not interpolate across gaps > max_gap_frames.
+    Supports:
+      1. frame_observations format: Dict[frame_idx -> List[detection_dict]]
+      2. track_history['tracks'] format: Dict[track_id -> {'observations': List[dict]}]
+      3. List of observation dicts: List[dict with 'frame_idx' and 'bbox']
+    """
+    if isinstance(tracks, list):
+        if len(tracks) < 2:
+            for d in tracks:
+                d.setdefault("interpolated", False)
+            return tracks
+
+        sorted_obs = sorted(tracks, key=lambda x: x["frame_idx"])
+        for d in sorted_obs:
+            d.setdefault("interpolated", False)
+
+        interpolated_list = []
+        for i in range(len(sorted_obs) - 1):
+            obs_a = sorted_obs[i]
+            obs_b = sorted_obs[i + 1]
+            interpolated_list.append(obs_a)
+
+            f_a = obs_a["frame_idx"]
+            f_b = obs_b["frame_idx"]
+            gap = f_b - f_a
+
+            if 1 < gap <= max_gap_frames:
+                box_a = obs_a["bbox"]
+                box_b = obs_b["bbox"]
+                conf_a = float(obs_a.get("confidence", obs_a.get("conf", 0.0)))
+                conf_b = float(obs_b.get("confidence", obs_b.get("conf", 0.0)))
+
+                for f in range(f_a + 1, f_b):
+                    alpha = (f - f_a) / float(gap)
+                    interp_box = [
+                        round(float(box_a[k] + alpha * (box_b[k] - box_a[k])), 2)
+                        for k in range(4)
+                    ]
+                    w = max(0.0, interp_box[2] - interp_box[0])
+                    h = max(0.0, interp_box[3] - interp_box[1])
+                    interp_obs = {
+                        "frame_idx": int(f),
+                        "bbox": interp_box,
+                        "confidence": round(float(conf_a + alpha * (conf_b - conf_a)), 3),
+                        "conf": round(float(conf_a + alpha * (conf_b - conf_a)), 3),
+                        "area": round(float(w * h), 1),
+                        "interpolated": True,
+                    }
+                    if "id" in obs_a:
+                        interp_obs["id"] = obs_a["id"]
+                    if "label" in obs_a:
+                        interp_obs["label"] = obs_a["label"]
+                    if "timestamp_sec" in obs_a and "timestamp_sec" in obs_b:
+                        ts_a = float(obs_a["timestamp_sec"])
+                        ts_b = float(obs_b["timestamp_sec"])
+                        interp_obs["timestamp_sec"] = round(float(ts_a + alpha * (ts_b - ts_a)), 3)
+                    if "timestamp" in obs_a and "timestamp_sec" in interp_obs:
+                        interp_obs["timestamp"] = format_timestamp(interp_obs["timestamp_sec"])
+                    interpolated_list.append(interp_obs)
+
+        interpolated_list.append(sorted_obs[-1])
+        return interpolated_list
+
+    if isinstance(tracks, dict) and any(isinstance(v, dict) and "observations" in v for v in tracks.values()):
+        for tid, tdata in tracks.items():
+            if kept_track_ids is not None and int(tid) not in kept_track_ids:
+                continue
+            if "observations" in tdata and isinstance(tdata["observations"], list):
+                tdata["observations"] = interpolate_track_gaps(tdata["observations"], max_gap_frames)
+                tdata["frame_count"] = len(tdata["observations"])
+        return tracks
+
+    if isinstance(tracks, dict):
+        frame_obs = tracks
+        for f_idx, dets in frame_obs.items():
+            for d in dets:
+                d.setdefault("interpolated", False)
+
+        by_track: Dict[int, List[dict]] = {}
+        for f_idx in sorted(frame_obs.keys()):
+            for det in frame_obs[f_idx]:
+                tid = det["id"]
+                if kept_track_ids is not None and tid not in kept_track_ids:
+                    continue
+                d_copy = dict(det)
+                d_copy["frame_idx"] = f_idx
+                by_track.setdefault(tid, []).append(d_copy)
+
+        for tid, obs_list in by_track.items():
+            if len(obs_list) < 2:
+                continue
+            for i in range(len(obs_list) - 1):
+                obs_a = obs_list[i]
+                obs_b = obs_list[i + 1]
+                f_a = obs_a["frame_idx"]
+                f_b = obs_b["frame_idx"]
+                gap = f_b - f_a
+
+                if 1 < gap <= max_gap_frames:
+                    box_a = obs_a["bbox"]
+                    box_b = obs_b["bbox"]
+                    conf_a = float(obs_a.get("conf", obs_a.get("confidence", 0.0)))
+                    conf_b = float(obs_b.get("conf", obs_b.get("confidence", 0.0)))
+                    label = obs_a.get("label", obs_b.get("label", "vehicle"))
+
+                    for f in range(f_a + 1, f_b):
+                        alpha = (f - f_a) / float(gap)
+                        interp_box = [
+                            round(float(box_a[k] + alpha * (box_b[k] - box_a[k])), 2)
+                            for k in range(4)
+                        ]
+                        w = max(0.0, interp_box[2] - interp_box[0])
+                        h = max(0.0, interp_box[3] - interp_box[1])
+                        interp_det = {
+                            "id": int(tid),
+                            "label": label,
+                            "conf": round(float(conf_a + alpha * (conf_b - conf_a)), 3),
+                            "confidence": round(float(conf_a + alpha * (conf_b - conf_a)), 3),
+                            "bbox": interp_box,
+                            "area": round(float(w * h), 1),
+                            "interpolated": True,
+                        }
+                        frame_obs.setdefault(f, []).append(interp_det)
+        return frame_obs
 
 
 class VehicleTrackingPipeline:
@@ -282,6 +417,7 @@ class VehicleTrackingPipeline:
                             "conf": float(conf),
                             "bbox": bbox.tolist(),
                             "area": float(area),
+                            "interpolated": False,
                         }
                     )
 
@@ -313,16 +449,26 @@ class VehicleTrackingPipeline:
         logger.info(f"Stitching finished: {len(stitched_pairs)} track merges executed.")
 
         # POST-TRACKING FILTERING: Exclude tiny distant clutter and brief transient flickers
-        logger.info("Applying post-tracking filters (min_frames >= 15, max_area >= 1200px)...")
+        logger.info(f"Applying post-tracking filters (min_frames >= {self.min_frames}, max_area >= {self.min_box_area}px)...")
+        effective_min_frames = max(5, math.ceil(self.min_frames / effective_stride)) if effective_stride > 1 else self.min_frames
         kept_track_ids = set()
         for tid, meta in tracks_meta.items():
-            if meta["frame_count"] < self.min_frames:
+            duration_obs = meta["end_timestamp_sec"] - meta["start_timestamp_sec"]
+            if meta["frame_count"] < effective_min_frames and duration_obs < 0.5:
                 continue
             if meta["max_area"] < self.min_box_area or meta["max_dim"] < self.min_box_dim:
                 continue
             kept_track_ids.add(tid)
 
         logger.info(f"Post-filtering: {len(kept_track_ids)} / {len(tracks_meta)} tracks kept.")
+
+        # SMOOTH TEMPORAL BOX INTERPOLATION: linearly bridge small gaps (<= max_gap_frames) across strided frames
+        max_gap_frames = max(6, effective_stride * 3)
+        frame_observations = interpolate_track_gaps(
+            tracks=frame_observations,
+            max_gap_frames=max_gap_frames,
+            kept_track_ids=kept_track_ids,
+        )
 
         # PASS 2: Render output video with ONLY kept tracks for pristine visual verification (optional)
         output_video_path = None
@@ -470,8 +616,14 @@ class VehicleTrackingPipeline:
                         "bbox": [round(float(c), 2) for c in det["bbox"]],
                         "confidence": round(float(det.get("conf", 0.0)), 3),
                         "area": round(float(det.get("area", 0.0)), 1),
+                        "interpolated": bool(det.get("interpolated", False)),
                     }
                     track_history_data["tracks"][str(tid)]["observations"].append(obs_entry)
+
+        for tid in sorted(kept_track_ids):
+            track_history_data["tracks"][str(tid)]["frame_count"] = len(
+                track_history_data["tracks"][str(tid)]["observations"]
+            )
 
         history_file = self.output_dir / "track_history.json"
         clean_history = make_json_serializable(track_history_data)

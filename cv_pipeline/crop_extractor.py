@@ -176,6 +176,12 @@ def extract_vehicle_crops(
     if not observations:
         raise ValueError(f"Target track(s) {target_ids} have no recorded frame observations.")
 
+    # Filter to pure non-interpolated true YOLO detections for Stage 2/3 cropping
+    # Fallback to all observations only if no non-interpolated frames exist
+    pure_obs = [obs for obs in observations if not obs.get("interpolated", False)]
+    if pure_obs:
+        observations = pure_obs
+
     # Determine dedicated output folder for this track: outputs/<clip_name>/track_<ID>/
     clip_name = track_video_path.stem
     output_dir = Path(output_dir)
@@ -375,6 +381,7 @@ def extract_vehicle_crops(
             "enhanced_path": str(enhanced_crop_path.as_posix()),
             "confidence": float(obs.get("confidence", 0.0)),
             "area": round(float(bw * bh), 1),
+            "interpolated": bool(obs.get("interpolated", False)),
         }
         manifest_crops.append(manifest_entry)
 

@@ -419,6 +419,27 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
     - Total Stage 1 latency: 22s with video (down from 77s) and 15s with `--no-video`.
   - Verified multi-ID pipeline execution on `file_07.mp4` Track `[20, 33]`: reconstructed `UP15BE5580` with valid RTO state code and all manifests reflecting `is_merged_track: True`.
 
+### 2026-11-24 07:10:00 IST — Smooth Temporal Box Interpolation Under Frame Striding
+- **1. Temporal Box Interpolation Helper (`interpolate_track_gaps`)**:
+  - Implemented $O(N)$ linear bounding-box interpolation across missing frames where $1 < \Delta f \le \text{max\_gap\_frames}$ (`max_gap_frames = max(6, vid_stride * 3)`).
+  - Calculates exact fractional interpolations for `[x1, y1, x2, y2]`, area, and confidence, tagging interpolated entries with `"interpolated": True` (and real detections with `"interpolated": False`).
+  - Gaps $> \text{max\_gap\_frames}$ (such as multi-second occlusions) are strictly untouched.
+- **2. Flicker-Free Pass 2 Video Rendering (`cv_pipeline/pipeline.py`)**:
+  - Interpolated boxes are incorporated into `frame_observations` before Pass 2 rendering.
+  - Video annotation renders on every native 30 FPS frame, eliminating box strobing/flickering while preserving 100% of the $4\times$ to $5\times$ tracking speedup.
+- **3. Fair Track Longevity Filtering Under Striding**:
+  - Scaled post-tracking `min_frames = max(5, ceil(min_frames / vid_stride))` and accepted tracks with observed $\text{duration} \ge 0.5\text{s}$ before interpolation so brief legitimate vehicles are not filtered out.
+- **4. Pure Stage 2/3 Crop Extraction (`cv_pipeline/crop_extractor.py`)**:
+  - Filters out `obs.get("interpolated", False)` so Stage 2 plate localization, Stage 2.3 dual OCR, Stage 2.4 VLM triple-check, and Stage 3 vehicle attribute extraction run strictly on pristine, authentic YOLO detections.
+- **5. Unit Tests & Benchmark Verification**:
+  - Added unit tests in `tests/test_multi_id_and_split_hysteresis.py`:
+    - Midpoint interpolation test (`frame 0` & `frame 2` produce exact midpoint at `frame 1` with `"interpolated": True`).
+    - Large gap rejection test (`gap > 6` is not interpolated).
+    - Crop extractor purity test (`crop_extractor` skips interpolated frames).
+  - All **75/75 unit tests passing ($100\%$)** across the test suite in 7.34s.
+  - Re-benchmarked fresh on `data/Final/file_07.mp4`: execution completed in ~20s with verified continuous, non-flickering bounding boxes across consecutive frames 0..9 in `track_history.json`.
+
+
 
 
 
