@@ -161,15 +161,54 @@ function localClipsPlugin(): Plugin {
           }
         }
 
-        // 3. Dev fallback for /outputs/ if backend is offline
+        // 3. Dev fallback for /outputs/ with HTTP 206 Range request support for smooth scrubbing
         if (req.method === 'GET' && urlPath.startsWith('/outputs/')) {
           const relPath = urlPath.slice('/outputs/'.length);
           const candidatePath = path.resolve(__dirname, '../outputs', relPath);
           if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isFile()) {
             const ext = path.extname(candidatePath).toLowerCase();
             const mimeType = MIME_MAP[ext] || 'application/octet-stream';
-            res.writeHead(200, { 'Content-Type': mimeType });
-            return fs.createReadStream(candidatePath).pipe(res);
+            const stat = fs.statSync(candidatePath);
+            const fileSize = stat.size;
+            const range = req.headers.range;
+
+            if (range) {
+              const parts = range.replace(/bytes=/, '').split('-');
+              const start = parseInt(parts[0], 10);
+              const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+              if (isNaN(start) || start >= fileSize || (parts[1] && isNaN(end)) || start > end) {
+                res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
+                return res.end();
+              }
+
+              const chunkSize = end - start + 1;
+              res.writeHead(206, {
+                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunkSize,
+                'Content-Type': mimeType,
+              });
+
+              const stream = fs.createReadStream(candidatePath, { start, end });
+              stream.on('error', () => {
+                if (!res.headersSent) res.writeHead(500);
+                res.end();
+              });
+              return stream.pipe(res);
+            } else {
+              res.writeHead(200, {
+                'Content-Length': fileSize,
+                'Content-Type': mimeType,
+                'Accept-Ranges': 'bytes',
+              });
+              const stream = fs.createReadStream(candidatePath);
+              stream.on('error', () => {
+                if (!res.headersSent) res.writeHead(500);
+                res.end();
+              });
+              return stream.pipe(res);
+            }
           }
         }
 

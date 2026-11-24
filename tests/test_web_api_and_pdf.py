@@ -15,17 +15,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import cv2
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.main as backend_main
 from backend.main import app, OUTPUTS_DIR
-from backend.pdf_report import generate_forensic_pdf
+from backend.pdf_report import generate_forensic_pdf, _resolve_image_path
+from cv_pipeline.video_renderer import ensure_tracked_web_video
 
 client = TestClient(app)
 
 
-def test_list_available_clips():
-    """Verify GET /api/pipeline/clips returns clips from data/Final."""
+def test_list_available_clips(tmp_path, monkeypatch):
+    """Verify GET /api/pipeline/clips returns clips from data/Final (or configured clips dir)."""
+    if not list(backend_main.CLIPS_DIR.glob("*.mp4")):
+        clips_dir = tmp_path / "Final"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        (clips_dir / "sample_01.mp4").write_bytes(b"\x00" * 1024)
+        monkeypatch.setattr(backend_main, "CLIPS_DIR", clips_dir)
+
     response = client.get("/api/pipeline/clips")
     assert response.status_code == 200
     clips = response.json()
@@ -78,40 +88,109 @@ def test_select_local_missing_file():
     assert "not found" in response.json()["detail"].lower()
 
 
-def test_select_local_instant_cache_hit():
-    """Verify POST /api/videos/select-local returns instant ready state on cached video."""
-    response = client.post("/api/videos/select-local", json={"filename": "simple_traffic_30s.mp4"})
+def _create_cached_stage1_fixture(tmp_path: Path, stem: str = "mock_traffic_clip") -> tuple[Path, Path]:
+    """Create isolated clips and outputs directories with cached Stage 1 H.264 web artifacts."""
+    clips_dir = tmp_path / "Final"
+    outputs_dir = tmp_path / "outputs"
+    clip_out_dir = outputs_dir / stem
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_out_dir.mkdir(parents=True, exist_ok=True)
+
+    (clips_dir / f"{stem}.mp4").write_bytes(b"\x00" * 2048)
+    (clip_out_dir / f"{stem}_tracked_web.mp4").write_bytes(b"\x00" * 2048)
+    summary = {
+        "video_fps": 30.0,
+        "video_resolution": "1920x1080",
+        "total_frames": 90,
+        "tracks": [
+            {
+                "id": 7,
+                "class_name": "car",
+                "category": "car",
+                "start_time_seconds": 0.2,
+                "end_time_seconds": 2.4,
+                "frame_count": 66,
+            }
+        ],
+    }
+    (clip_out_dir / "tracks_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    return clips_dir, outputs_dir
+
+
+def test_select_local_instant_cache_hit(tmp_path, monkeypatch):
+    """Verify POST /api/videos/select-local returns instant ready state when tracked H.264 video exists."""
+    clips_dir, outputs_dir = _create_cached_stage1_fixture(tmp_path, "mock_traffic_clip")
+    monkeypatch.setattr(backend_main, "CLIPS_DIR", clips_dir)
+    monkeypatch.setattr(backend_main, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(backend_main, "JOBS", {})
+
+    response = client.post("/api/videos/select-local", json={"filename": "mock_traffic_clip.mp4"})
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ready"
     assert data["stage_step"] == 3
     assert data["progress"] == 100
-    assert data["job_id"] == "simple_traffic_30s"
+    assert data["job_id"] == "mock_traffic_clip"
 
     res = data["result"]
     assert res is not None
-    assert res["job_id"] == "simple_traffic_30s"
-    assert res["boxes_url"] == "/outputs/simple_traffic_30s/boxes.json"
+    assert res["job_id"] == "mock_traffic_clip"
+    assert res["tracked_video_url"] == "/outputs/mock_traffic_clip/mock_traffic_clip_tracked_web.mp4"
+    assert res["video_url"] == "/outputs/mock_traffic_clip/mock_traffic_clip_tracked_web.mp4"
+    assert res["raw_video_url"] == "/media/clips/mock_traffic_clip.mp4"
+    assert res["boxes_url"] == "/outputs/mock_traffic_clip/boxes.json"
     assert isinstance(res["tracks"], list)
-    assert len(res["tracks"]) > 0
+    assert len(res["tracks"]) == 1
 
     track0 = res["tracks"][0]
-    assert "track_id" in track0
-    assert "vehicle_class" in track0
+    assert track0["track_id"] == 7
+    assert track0["vehicle_class"] == "car"
     assert "crop_url" in track0
     assert "start_sec" in track0
     assert "end_sec" in track0
 
 
-def test_video_status_endpoint():
+def test_select_local_fast_render_tier2(tmp_path, monkeypatch):
+    """Verify POST /api/videos/select-local triggers Tier 2 fast render when history exists without web video."""
+    clips_dir = tmp_path / "Final"
+    outputs_dir = tmp_path / "outputs"
+    clip_out_dir = outputs_dir / "tier2_clip"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_out_dir.mkdir(parents=True, exist_ok=True)
+
+    (clips_dir / "tier2_clip.mp4").write_bytes(b"\x00" * 2048)
+    (clip_out_dir / "tracks_summary.json").write_text(json.dumps({"tracks": []}), encoding="utf-8")
+    (clip_out_dir / "track_history.json").write_text(json.dumps({"tracks": {}}), encoding="utf-8")
+
+    submitted = []
+    monkeypatch.setattr(backend_main, "CLIPS_DIR", clips_dir)
+    monkeypatch.setattr(backend_main, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(backend_main, "JOBS", {})
+    monkeypatch.setattr(backend_main.STAGE1_EXECUTOR, "submit", lambda fn, *a: submitted.append((fn.__name__, a)))
+
+    response = client.post("/api/videos/select-local", json={"filename": "tier2_clip.mp4"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "running"
+    assert data["stage_step"] == 2
+    assert len(submitted) == 1
+    assert submitted[0][0] == "_run_fast_render_job"
+
+
+def test_video_status_endpoint(tmp_path, monkeypatch):
     """Verify GET /api/videos/{job_id}/status for ready and missing jobs."""
-    # Known ready job
-    r_ready = client.get("/api/videos/simple_traffic_30s/status")
+    clips_dir, outputs_dir = _create_cached_stage1_fixture(tmp_path, "mock_status_clip")
+    monkeypatch.setattr(backend_main, "CLIPS_DIR", clips_dir)
+    monkeypatch.setattr(backend_main, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(backend_main, "JOBS", {})
+
+    # Known ready job on disk
+    r_ready = client.get("/api/videos/mock_status_clip/status")
     assert r_ready.status_code == 200
     ready_data = r_ready.json()
     assert ready_data["status"] == "ready"
     assert ready_data["progress"] == 100
-    assert ready_data["result"]["boxes_url"] == "/outputs/simple_traffic_30s/boxes.json"
+    assert ready_data["result"]["tracked_video_url"] == "/outputs/mock_status_clip/mock_status_clip_tracked_web.mp4"
 
     # Missing job
     r_missing = client.get("/api/videos/non_existent_job_xyz_999/status")
@@ -447,3 +526,59 @@ def test_pipeline_verify_cache_hit_and_pdf_download(tmp_path):
         # Cleanup mock directory
         import shutil
         shutil.rmtree(OUTPUTS_DIR / mock_job, ignore_errors=True)
+
+
+def test_pdf_resolve_image_path(tmp_path):
+    """Verify _resolve_image_path resolves /outputs URLs and nested track subdirectories."""
+    track_dir = tmp_path / "outputs" / "demo_clip" / "track_012"
+    plate_dir = track_dir / "plate_crops_all" / "unenhanced"
+    plate_dir.mkdir(parents=True, exist_ok=True)
+    plate_img = plate_dir / "plate_000010.png"
+    plate_img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    resolved_url = _resolve_image_path(
+        "/outputs/demo_clip/track_012/plate_crops_all/unenhanced/plate_000010.png",
+        track_dir,
+        base_dir=tmp_path,
+    )
+    assert resolved_url == plate_img
+
+    resolved_rel = _resolve_image_path("plate_crops_all/unenhanced/plate_000010.png", track_dir, base_dir=tmp_path)
+    assert resolved_rel == plate_img
+
+
+def test_video_renderer_pass2_and_transcode(tmp_path):
+    """Verify Pass 2 rendering from track_history.json produces raw and H.264 web MP4s."""
+    video_path = tmp_path / "tiny_clip.mp4"
+    out_dir = tmp_path / "outputs" / "tiny_clip"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(video_path), fourcc, 15.0, (320, 240))
+    for i in range(5):
+        frame = np.full((240, 320, 3), 40 + i * 20, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+    summary = {"tracks": [{"id": 1, "class_name": "car", "category": "car"}]}
+    history = {
+        "tracks": {
+            "1": {
+                "id": 1,
+                "class_name": "car",
+                "category": "car",
+                "observations": [
+                    {"frame_idx": i, "bbox": [40 + i * 5, 60, 140 + i * 5, 160], "confidence": 0.9}
+                    for i in range(5)
+                ],
+            }
+        }
+    }
+    (out_dir / "tracks_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (out_dir / "track_history.json").write_text(json.dumps(history), encoding="utf-8")
+
+    web_path = ensure_tracked_web_video(video_path, out_dir, "tiny_clip")
+    assert web_path.is_file()
+    assert web_path.name == "tiny_clip_tracked_web.mp4"
+    assert web_path.stat().st_size > 1000
+    assert (out_dir / "tiny_clip_tracked.mp4").is_file()

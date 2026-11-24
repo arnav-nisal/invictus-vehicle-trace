@@ -122,10 +122,55 @@ def _safe_image(path: Optional[Union[str, Path]], max_w: float, max_h: float) ->
         return None
 
 
+def _resolve_image_path(
+    img_ref: Optional[Union[str, Path]],
+    t_dir: Path,
+    base_dir: Optional[Union[str, Path]] = None,
+) -> Optional[Path]:
+    """Resolve an image reference (URL, relative path, or absolute path) to a local Path."""
+    if not img_ref:
+        return None
+    p = Path(img_ref)
+    if p.is_file() and p.stat().st_size > 0:
+        return p
+
+    # 1. Check directly relative to t_dir or by filename inside t_dir
+    if (t_dir / p.name).is_file():
+        return t_dir / p.name
+    clean_ref = str(img_ref).replace("\\", "/").lstrip("/")
+    if (t_dir / clean_ref).is_file():
+        return t_dir / clean_ref
+
+    # 2. Check under subdirectories inside t_dir (e.g. plate_crops_all/unenhanced/...)
+    parts = clean_ref.split("/")
+    for i in range(len(parts)):
+        sub = Path(*parts[i:])
+        if (t_dir / sub).is_file():
+            return t_dir / sub
+
+    # 3. Check relative to base_dir or project root
+    root = Path(base_dir) if base_dir else Path(__file__).resolve().parent.parent
+    if (root / clean_ref).is_file():
+        return root / clean_ref
+
+    # 4. Strip outputs/ or test_outputs/ prefix and check root / outputs / rel or root / test_outputs / rel
+    for prefix in ("outputs/", "test_outputs/"):
+        if clean_ref.startswith(prefix):
+            rel = clean_ref[len(prefix):]
+            for folder in ("outputs", "test_outputs"):
+                cand = root / folder / rel
+                if cand.is_file():
+                    return cand
+            break
+
+    return None
+
+
 def generate_forensic_pdf(
     data: Dict[str, Any],
     output_pdf_path: Union[str, Path],
     track_dir: Optional[Union[str, Path]] = None,
+    base_dir: Optional[Union[str, Path]] = None,
 ) -> Path:
     """Generate a publication-grade forensic dossier PDF from verification_result data."""
     out_pdf = Path(output_pdf_path)
@@ -378,22 +423,44 @@ def generate_forensic_pdf(
 
     # Resolve image paths
     # Search in track_dir or data["evidence_urls"]
-    crop_vehicle = _safe_image(t_dir / "stage3_vehicle_crops_top3.png", content_width * 0.48, 120)
+    ev_urls = data.get("evidence_urls") or {}
+
+    veh_ref = (
+        ev_urls.get("vehicle_contact_strip_url")
+        or ev_urls.get("best_vehicle_crop_url")
+        or (t_dir / "stage3_vehicle_crops_top3.png")
+    )
+    crop_vehicle = _safe_image(_resolve_image_path(veh_ref, t_dir, base_dir), content_width * 0.48, 120)
     if not crop_vehicle:
         # Fallback to single vehicle crop
-        raw_crop_dir = t_dir / "vehicle_crops_unenhanced"
-        if raw_crop_dir.is_dir():
-            first_c = next(raw_crop_dir.glob("*.png"), None)
-            if first_c:
-                crop_vehicle = _safe_image(first_c, content_width * 0.48, 120)
+        for v_sub in ("vehicle_crops_unenhanced", "vehicle_crops_raw", "vehicle_crops_enhanced"):
+            raw_crop_dir = t_dir / v_sub
+            if raw_crop_dir.is_dir():
+                first_c = next(raw_crop_dir.glob("*.png"), None)
+                if first_c:
+                    crop_vehicle = _safe_image(first_c, content_width * 0.48, 120)
+                    if crop_vehicle:
+                        break
 
-    crop_plate_grid = _safe_image(t_dir / "vlm_evidence_unenhanced_grid.png", content_width * 0.48, 120)
+    plate_ref = (
+        ev_urls.get("plate_grid_unenhanced_url")
+        or ev_urls.get("plate_grid_enhanced_url")
+        or ev_urls.get("clearest_plate_crop_url")
+        or (t_dir / "vlm_evidence_unenhanced_grid.png")
+    )
+    crop_plate_grid = _safe_image(_resolve_image_path(plate_ref, t_dir, base_dir), content_width * 0.48, 120)
     if not crop_plate_grid:
-        clearest_dir = t_dir / "plate_crops_selected" / "unenhanced"
-        if clearest_dir.is_dir():
-            first_p = next(clearest_dir.glob("*.png"), None)
-            if first_p:
-                crop_plate_grid = _safe_image(first_p, content_width * 0.48, 120)
+        for p_sub in (
+            t_dir / "plate_crops_selected" / "unenhanced",
+            t_dir / "plate_crops_all" / "unenhanced",
+            t_dir / "plate_crops_selected" / "enhanced",
+        ):
+            if p_sub.is_dir():
+                first_p = next(p_sub.glob("*.png"), None)
+                if first_p:
+                    crop_plate_grid = _safe_image(first_p, content_width * 0.48, 120)
+                    if crop_plate_grid:
+                        break
 
     gallery_cells = [
         [

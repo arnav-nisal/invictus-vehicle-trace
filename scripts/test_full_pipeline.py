@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -26,6 +27,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
+from backend.database import (
+    ensure_db_exists,
+    get_all_registry_vehicles,
+    get_sightings_by_plate,
+    get_total_vehicles_count,
+)
+from backend.matcher import match_and_rank_vehicles
+from backend.pdf_report import generate_forensic_pdf
+from backend.schemas import BodyType, VehicleEvidence
 from cv_pipeline.crop_extractor import extract_vehicle_crops, parse_target_ids
 from cv_pipeline.ocr_engine import run_ocr_track
 from cv_pipeline.pipeline import VehicleTrackingPipeline
@@ -305,8 +315,10 @@ def get_clearest_crop_path(track_dir: Path, ocr_result: Dict[str, Any]) -> Optio
     vlm_pack = ocr_result.get("vlm_evidence_pack") or []
     if vlm_pack and vlm_pack[0].get("unenhanced_crop_path"):
         p = Path(vlm_pack[0]["unenhanced_crop_path"])
-        if not p.is_file():
-            p = track_dir / "plate_crops_selected" / "unenhanced" / p.name
+        for sub in ("plate_crops_selected/unenhanced", "plate_crops_all/unenhanced"):
+            local_p = track_dir / Path(sub) / p.name
+            if local_p.is_file():
+                return local_p
         if p.is_file():
             return p
 
@@ -327,21 +339,230 @@ def get_clearest_crop_path(track_dir: Path, ocr_result: Dict[str, Any]) -> Optio
                 u_path = top.get("selected_unenhanced_path") or top.get("all_unenhanced_path")
                 if u_path:
                     p = Path(u_path)
-                    if not p.is_file():
-                        p = track_dir / "plate_crops_selected" / "unenhanced" / p.name
+                    for sub in ("plate_crops_selected/unenhanced", "plate_crops_all/unenhanced"):
+                        local_p = track_dir / Path(sub) / p.name
+                        if local_p.is_file():
+                            return local_p
                     if p.is_file():
                         return p
         except Exception:
             pass
 
-    # 3. Fallback: first png in plate_crops_selected/unenhanced
-    sel_unenh = track_dir / "plate_crops_selected" / "unenhanced"
-    if sel_unenh.is_dir():
-        pngs = sorted(sel_unenh.glob("*.png"))
-        if pngs:
-            return pngs[0]
+    # 3. Fallback: first png in plate_crops_selected/unenhanced or plate_crops_all/unenhanced
+    for sub in ("plate_crops_selected/unenhanced", "plate_crops_all/unenhanced"):
+        sel_unenh = track_dir / Path(sub)
+        if sel_unenh.is_dir():
+            pngs = sorted(sel_unenh.glob("*.png"))
+            if pngs:
+                return pngs[0]
 
     return None
+
+
+def map_to_body_type(val: Optional[str]) -> BodyType:
+    """Safely map arbitrary vehicle class/category string to BodyType enum."""
+    if not val:
+        return BodyType.CAR
+    s = str(val).lower().strip().replace("_", "-").replace(" ", "-")
+    if s in ("motorcycle", "scooter", "bike", "two-wheeler", "bicycle"):
+        return BodyType.TWO_WHEELER
+    if s in ("auto", "auto-rickshaw", "rickshaw", "tuk-tuk"):
+        return BodyType.AUTO_RICKSHAW
+    if s in ("suv", "crossover"):
+        return BodyType.SUV
+    if s in ("bus",):
+        return BodyType.BUS
+    if s in ("truck", "lorry", "pickup"):
+        return BodyType.TRUCK
+    return BodyType.CAR
+
+
+def run_stage_4_registry_and_report(
+    s2_res: Dict[str, Any],
+    clip_stem: str,
+    video_path: Path,
+    skip_registry: bool = False,
+) -> Dict[str, Any]:
+    """Execute Stage 4 SQLite registry comparison and forensic PDF generation."""
+    t0_s4 = time.time()
+    track_dir = Path(s2_res["track_dir"])
+    primary_id = s2_res["track_id"]
+    target_ids = s2_res.get("merged_track_ids", [primary_id])
+    is_merged = s2_res.get("is_merged_track", False)
+    track_key = track_dir.name
+
+    ocr_res = s2_res.get("ocr_result") or {}
+    vlm_res = s2_res.get("vlm_result") or {}
+    manifest = s2_res.get("crop_manifest") or {}
+    veh_attrs = s2_res.get("vehicle_attributes") or {}
+
+    final_plate = (
+        vlm_res.get("final_plate")
+        or vlm_res.get("reconciled_plate")
+        or ocr_res.get("recovered_plate", "??????????")
+    )
+    overall_conf = float(
+        vlm_res.get("overall_confidence", ocr_res.get("overall_confidence", 0.0))
+    )
+
+    reconciled_slots = vlm_res.get("reconciled_slots", [])
+    char_confs = [
+        float(s.get("final_char_soft_score", s.get("vlm_conf", 0.5)))
+        for s in reconciled_slots
+    ]
+    if not char_confs:
+        ocr_slots = ocr_res.get("slots", [])
+        char_confs = [
+            float(s.get("final_confidence", s.get("pipe_a_conf", overall_conf)))
+            for s in ocr_slots
+        ]
+    if not char_confs:
+        char_confs = [overall_conf] * len(final_plate)
+
+    attrs = veh_attrs.get("attributes", {}) if veh_attrs else {}
+    body_val = attrs.get("body_type") or manifest.get("class_name", "car")
+    body_enum = map_to_body_type(body_val)
+    colour_val = attrs.get("colour", "white")
+
+    total_db_records = 0
+    formatted_matches: List[Dict[str, Any]] = []
+
+    if not skip_registry:
+        print("\n[Stage 4] Querying local SQLite registry and ranking candidate vehicles...")
+        db_path = ensure_db_exists()
+        total_db_records = get_total_vehicles_count(db_path)
+        reg_vehicles = get_all_registry_vehicles(db_path)
+
+        evidence = VehicleEvidence(
+            track_id=primary_id,
+            consensus_plate=final_plate,
+            char_confidences=char_confs,
+            colour=colour_val,
+            colour_conf=float(attrs.get("colour_conf", 0.85)),
+            body_type=body_enum,
+            body_type_conf=float(attrs.get("body_type_conf", 0.85)),
+            make=attrs.get("make", "Unknown"),
+            make_conf=float(attrs.get("make_conf", 0.0)),
+            model=attrs.get("model", "Unknown"),
+            model_conf=float(attrs.get("model_conf", 0.0)),
+            plate_detected=(final_plate != "NO_PLATE"),
+        )
+
+        match_resp = match_and_rank_vehicles(
+            evidence=evidence,
+            registry_vehicles=reg_vehicles,
+            top_k=5,
+        )
+
+        for cand in match_resp.top_matches:
+            sightings = []
+            try:
+                sightings = [s.model_dump() for s in get_sightings_by_plate(cand.plate_number, db_path)]
+            except Exception:
+                pass
+
+            formatted_matches.append({
+                "rank": cand.rank,
+                "plate_number": cand.plate_number,
+                "total_confidence": cand.composite_score,
+                "plate_score": cand.score_breakdown.plate_score,
+                "visual_score": cand.score_breakdown.visual_score,
+                "body_type": cand.body_type,
+                "colour": cand.colour,
+                "make": cand.make,
+                "model": cand.model,
+                "owner_name": cand.owner_name or "Unknown",
+                "registered_rto": cand.registered_rto or cand.rto_city,
+                "registration_year": cand.registration_year,
+                "sightings": sightings,
+            })
+
+        # Save registry_matches.json
+        matches_path = track_dir / "registry_matches.json"
+        with open(matches_path, "w", encoding="utf-8") as f:
+            json.dump(formatted_matches, f, indent=2)
+
+    # Build evidence_urls
+    clearest_p = get_clearest_crop_path(track_dir, ocr_res)
+    clearest_url = None
+    if clearest_p:
+        try:
+            rel_p = clearest_p.relative_to(track_dir).as_posix()
+        except ValueError:
+            rel_p = clearest_p.name
+        clearest_url = f"/outputs/{clip_stem}/{track_key}/{rel_p}"
+
+    best_veh_p = track_dir / "stage3_vehicle_crops_top3.png"
+    if not best_veh_p.is_file():
+        raw_veh_d = track_dir / "vehicle_crops_unenhanced"
+        if raw_veh_d.is_dir():
+            first_v = next(raw_veh_d.glob("*.png"), None)
+            if first_v:
+                best_veh_p = first_v
+
+    evidence_urls = {
+        "best_vehicle_crop_url": f"/outputs/{clip_stem}/{track_key}/{best_veh_p.name}" if best_veh_p and best_veh_p.is_file() else None,
+        "vehicle_contact_strip_url": f"/outputs/{clip_stem}/{track_key}/stage3_vehicle_crops_top3.png" if (track_dir / "stage3_vehicle_crops_top3.png").is_file() else None,
+        "clearest_plate_crop_url": clearest_url,
+        "plate_grid_unenhanced_url": f"/outputs/{clip_stem}/{track_key}/vlm_evidence_unenhanced_grid.png" if (track_dir / "vlm_evidence_unenhanced_grid.png").is_file() else None,
+        "plate_grid_enhanced_url": f"/outputs/{clip_stem}/{track_key}/vlm_evidence_enhanced_grid.png" if (track_dir / "vlm_evidence_enhanced_grid.png").is_file() else None,
+    }
+
+    elapsed_total = round(s2_res.get("elapsed_seconds", 0.0) + (time.time() - t0_s4), 2)
+    ver_result = {
+        "case_id": f"INV-{clip_stem.upper()}-{track_key.upper()}",
+        "job_id": clip_stem,
+        "track_key": track_key,
+        "filename": video_path.name,
+        "target_id": primary_id,
+        "merged_track_ids": target_ids,
+        "is_merged_track": is_merged,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "processing_time_sec": elapsed_total,
+        "plate": {
+            "final_plate": final_plate,
+            "overall_confidence": overall_conf,
+            "valid_state_code": vlm_res.get("state_code_valid", ocr_res.get("state_code_valid", False)),
+            "provider_used": vlm_res.get("provider_used", "none"),
+            "model_used": vlm_res.get("model_used", "none"),
+            "reconciled_slots": vlm_res.get("reconciled_slots", []),
+            "ghost_predictions": vlm_res.get("ghost_predictions", []),
+        },
+        "vehicle": {
+            "body_type": body_val,
+            "body_type_conf": float(attrs.get("body_type_conf", 0.85)),
+            "colour": colour_val,
+            "colour_conf": float(attrs.get("colour_conf", 0.85)),
+            "make": attrs.get("make", "Unknown"),
+            "make_conf": float(attrs.get("make_conf", 0.0)),
+            "model": attrs.get("model", "Unknown"),
+            "model_conf": float(attrs.get("model_conf", 0.0)),
+            "provider_used": veh_attrs.get("provider", "none") if veh_attrs else "none",
+            "selected_crops": veh_attrs.get("selected_crop_names", []) if veh_attrs else [],
+        },
+        "registry_matches": formatted_matches,
+        "evidence_urls": evidence_urls,
+        "pdf_report_url": f"/api/reports/{clip_stem}/{track_key}/pdf",
+    }
+
+    # Save verification_result.json
+    ver_path = track_dir / "verification_result.json"
+    with open(ver_path, "w", encoding="utf-8") as f:
+        json.dump(ver_result, f, indent=2)
+
+    # Generate Forensic PDF
+    pdf_path = track_dir / f"Invictus_Report_{clip_stem}_{track_key}.pdf"
+    try:
+        generate_forensic_pdf(ver_result, pdf_path, track_dir=track_dir)
+    except Exception as e:
+        logger.error(f"Failed to generate PDF for {track_key}: {e}", exc_info=True)
+
+    s2_res["total_db_records"] = total_db_records
+    s2_res["registry_matches"] = formatted_matches
+    s2_res["verification_result"] = ver_result
+    s2_res["pdf_path"] = pdf_path if pdf_path.is_file() else None
+    s2_res["skip_registry"] = skip_registry
+    return s2_res
 
 
 def print_forensic_report(s2_res: Dict[str, Any]):
@@ -469,10 +690,49 @@ def print_forensic_report(s2_res: Dict[str, Any]):
             print(f"  Selected Crops: {', '.join(crop_names)}")
         print("=" * 95)
 
+    # Stage 4 SQLite Registry Comparison
+    skip_reg = s2_res.get("skip_registry", False)
+    if not skip_reg:
+        total_db = s2_res.get("total_db_records", 0)
+        matches = s2_res.get("registry_matches", [])
+        print("\n" + "=" * 95)
+        print(f"  STAGE 4 — SQLITE REGISTRY COMPARISON (Total Records Searched: {total_db:,})")
+        print("=" * 95)
+        if matches:
+            print(
+                f"  {'Rank':<4} | {'Plate':<12} | {'Total %':<7} | {'Plate %':<7} | {'Visual %':<8} | {'Vehicle (Colour Make Model · Body)':<33} | {'Owner / RTO'}"
+            )
+            print("  " + "-" * 91)
+            for cand in matches[:5]:
+                r = f"#{cand.get('rank', 1)}"
+                p = cand.get("plate_number", "Unknown")
+                tot = f"{cand.get('total_confidence', 0.0):.0%}"
+                p_sc = f"{cand.get('plate_score', 0.0):.0%}"
+                v_sc = f"{cand.get('visual_score', 0.0):.0%}"
+                c_m_m = f"{str(cand.get('colour', '')).capitalize()} {cand.get('make', '')} {cand.get('model', '')} · {str(cand.get('body_type', '')).capitalize()}".strip()
+                if len(c_m_m) > 33:
+                    c_m_m = c_m_m[:30] + "..."
+                owner_rto = f"{cand.get('owner_name', 'Unknown')} / {cand.get('registered_rto', 'Unknown')}"
+                print(f"  {r:<4} | {p:<12} | {tot:>7} | {p_sc:>7} | {v_sc:>8} | {c_m_m:<33} | {owner_rto}")
+
+            top_m = matches[0]
+            sightings = top_m.get("sightings", [])
+            if sightings:
+                print(f"\n  Chronological Sightings for Rank #1 ({top_m.get('plate_number')}):")
+                for s in sightings:
+                    ts = s.get("timestamp", "--")
+                    cam = s.get("camera_id", "CAM_01")
+                    conf = f"{s.get('confidence', 0.0):.0%}"
+                    print(f"    • {ts} | Camera: {cam} | Confidence: {conf}")
+        else:
+            print("  No matching vehicle found in local SQLite registry.")
+        print("=" * 95)
+
     # Asset paths
     grid_path = track_dir / "vlm_evidence_unenhanced_grid.png"
     clearest_path = get_clearest_crop_path(track_dir, ocr_res)
     contact_strip_path = track_dir / "stage3_vehicle_crops_top3.png"
+    pdf_path = s2_res.get("pdf_path")
     print("\n  Forensic Visual Assets:")
     if clearest_path and clearest_path.is_file():
         print(f"  -> Clearest Plate Image:        {clearest_path.resolve()}")
@@ -480,6 +740,10 @@ def print_forensic_report(s2_res: Dict[str, Any]):
         print(f"  -> 2x2 Plate Evidence Grid:     {grid_path.resolve()}")
     if contact_strip_path.is_file():
         print(f"  -> 1x3 Vehicle Contact Strip:   {contact_strip_path.resolve()}")
+    if pdf_path and Path(pdf_path).is_file():
+        p_obj = Path(pdf_path)
+        sz_str = format_size(p_obj.stat().st_size)
+        print(f"  -> Forensic PDF Report:         {p_obj.resolve()} ({sz_str})")
     print("=" * 95)
 
 
@@ -538,6 +802,16 @@ def parse_args():
         "--skip-attributes",
         action="store_true",
         help="Skip Stage 3 vehicle attribute extraction.",
+    )
+    parser.add_argument(
+        "--skip-registry",
+        action="store_true",
+        help="Skip Stage 4 SQLite registry comparison.",
+    )
+    parser.add_argument(
+        "--open-pdf",
+        action="store_true",
+        help="Automatically open generated Forensic PDF Summary Report in OS viewer.",
     )
     parser.add_argument(
         "--reuse-tracking",
@@ -664,6 +938,14 @@ def main():
                     skip_attributes=args.skip_attributes,
                 )
 
+                # Run Stage 4 SQLite Registry Comparison & Forensic PDF Generation
+                s2_results = run_stage_4_registry_and_report(
+                    s2_res=s2_results,
+                    clip_stem=clip_stem,
+                    video_path=selected_video,
+                    skip_registry=args.skip_registry,
+                )
+
                 # Print forensic report
                 print_forensic_report(s2_results)
 
@@ -678,8 +960,18 @@ def main():
                         )
                         open_file_in_os(clearest_crop)
 
+                # Auto-open PDF if --open-pdf requested
+                if args.open_pdf and not args.no_open:
+                    pdf_p = s2_results.get("pdf_path")
+                    if pdf_p and Path(pdf_p).is_file():
+                        print(
+                            f"\n[AUTO-OPEN] Opening Forensic PDF Report in default viewer: {Path(pdf_p).name}"
+                        )
+                        open_file_in_os(pdf_p)
+
             except Exception as e:
-                logger.error(f"Stage 2 failed for Track {current_target_id}: {e}", exc_info=True)
+                logger.error(f"Pipeline failed for Track {current_target_id}: {e}", exc_info=True)
+                s2_results = None
 
             # If user ran via non-interactive --track-id, exit once done
             if args.track_id is not None:
@@ -687,30 +979,69 @@ def main():
 
             # Reset current_target_id to allow selecting next track
             current_target_id = None
+            pdf_p = s2_results.get("pdf_path") if s2_results else None
+            track_dir = s2_results["track_dir"] if s2_results else None
 
-            # Fast loop prompt
-            try:
-                loop_inp = input(
-                    f"\nTrace another track from '{clip_stem}'? Enter Track ID(s), [b] change video, or [q] quit: "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("\nExiting.")
-                return
+            # Upgraded post-run interactive menu
+            loop_action = None
+            while True:
+                print("\n  [p] Open Forensic PDF Summary Report")
+                print("  [c] Open 1x3 Stage 3 Vehicle Contact Strip")
+                print("  [v] Re-open Stage 1 tracked video")
+                print("  [b] Switch to a different video clip")
+                print("  [q] Quit tester\n")
 
-            if loop_inp == "q":
-                print("Exiting.")
-                return
-            elif loop_inp == "b":
-                break
-            else:
                 try:
-                    parsed = parse_target_ids(loop_inp)
-                    invalid = [t for t in parsed if t not in available_ids]
-                    if not invalid:
+                    loop_inp = input(
+                        f"Trace another track from '{clip_stem}'? Enter Track ID(s), [p], [c], [v], [b], or [q]: "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nExiting.")
+                    return
+
+                if loop_inp in ("q", "quit", "exit"):
+                    print("Exiting.")
+                    return
+                elif loop_inp == "b":
+                    loop_action = "b"
+                    break
+                elif loop_inp == "p":
+                    if pdf_p and Path(pdf_p).is_file():
+                        print(f"[INFO] Opening Forensic PDF Report: {pdf_p}")
+                        open_file_in_os(pdf_p)
+                    else:
+                        print("[WARN] Forensic PDF Report not found.")
+                    continue
+                elif loop_inp == "c":
+                    strip_p = track_dir / "stage3_vehicle_crops_top3.png" if track_dir else None
+                    if strip_p and strip_p.is_file():
+                        print(f"[INFO] Opening 1x3 Vehicle Contact Strip: {strip_p}")
+                        open_file_in_os(strip_p)
+                    else:
+                        print("[WARN] 1x3 Vehicle Contact Strip not found.")
+                    continue
+                elif loop_inp == "v":
+                    if annotated_video_path and Path(annotated_video_path).is_file():
+                        print(f"[INFO] Opening annotated video: {annotated_video_path}")
+                        open_file_in_os(annotated_video_path)
+                    else:
+                        print("[WARN] Annotated video path not found.")
+                    continue
+                else:
+                    try:
+                        parsed = parse_target_ids(loop_inp)
+                        invalid = [t for t in parsed if t not in available_ids]
+                        if invalid:
+                            print(f"[ERROR] Track ID(s) {invalid} not in detected tracks list. Available IDs: {sorted(available_ids.keys())}")
+                            continue
                         current_target_id = parsed if len(parsed) > 1 else parsed[0]
-                except Exception:
-                    pass
-            # Else loop will reprint table and prompt
+                        break
+                    except Exception:
+                        print("Invalid input. Please enter valid Track ID(s), 'p', 'c', 'v', 'b', or 'q'.")
+                        continue
+
+            if loop_action == "b":
+                break
 
         if args.video:
             break

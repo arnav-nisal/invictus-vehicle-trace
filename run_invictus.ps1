@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # Invictus Vehicle Trace — Dual-Terminal Live Launcher
 # Launches:
 #   Terminal 1: FastAPI Backend + Live Forensic Pipeline Monitor (Port 8000)

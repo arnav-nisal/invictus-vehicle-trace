@@ -30,6 +30,7 @@ build/
 *.mkv
 data/clips/
 data/Final/
+data/Given/
 
 # Output Directories & Generated Visuals
 outputs/
@@ -53,5 +54,6 @@ Thumbs.db
 node_modules/
 frontend/node_modules/
 frontend/dist/
+vite.config.ts.timestamp-*.mjs
 
 invictus-vehicle-trace.rar

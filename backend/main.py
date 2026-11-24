@@ -52,6 +52,7 @@ from cv_pipeline.ocr_engine import run_ocr_track
 from cv_pipeline.pipeline import VehicleTrackingPipeline
 from cv_pipeline.plate_detector import run_dual_plate_detection
 from cv_pipeline.vehicle_crop_selector import run_stage3_vehicle_attributes
+from cv_pipeline.video_renderer import ensure_tracked_web_video, render_annotated_video_from_history, transcode_to_h264
 from cv_pipeline.vlm_verifier import verify_track_vlm
 from cv_pipeline.web_artifacts import build_web_artifacts, parse_resolution
 
@@ -240,28 +241,47 @@ def _get_clearest_crop_path(track_dir: Path, ocr_result: Dict[str, Any]) -> Opti
 
 def _build_stage1_result(clip_stem: str, video_path: Path, tracks_summary: Dict[str, Any]) -> Dict[str, Any]:
     """Format tracks_summary into the exact result structure required by Screen 2 frontend."""
+    raw_fps = tracks_summary.get("video_fps")
+    try:
+        fps_val = float(raw_fps) if raw_fps is not None else 30.0
+        if fps_val <= 0:
+            fps_val = 30.0
+    except (ValueError, TypeError):
+        fps_val = 30.0
+
     width, height = parse_resolution(tracks_summary.get("video_resolution"))
-    tracks_list = [
-        {
-            "track_id": int(t["id"]),
-            "vehicle_class": t.get("class_name", "vehicle"),
-            "category": t.get("category", t.get("class_name", "vehicle")),
-            "crop_url": f"/outputs/{clip_stem}/thumbnails/track_{int(t['id']):03d}.jpg",
-            "start_sec": round(float(t.get("start_time_seconds", 0.0)), 2),
-            "end_sec": round(float(t.get("end_time_seconds", 0.0)), 2),
-            "frame_count": int(t.get("frame_count", 0)),
-        }
-        for t in tracks_summary.get("tracks", [])
-        if "id" in t
-    ]
+    if width <= 0 or height <= 0:
+        width, height = 1920, 1080
+
+    tracks_list = []
+    for t in tracks_summary.get("tracks", []):
+        if not isinstance(t, dict) or "id" not in t:
+            continue
+        try:
+            tid = int(t["id"])
+            tracks_list.append({
+                "track_id": tid,
+                "vehicle_class": str(t.get("class_name", "vehicle")),
+                "category": str(t.get("category", t.get("class_name", "vehicle"))),
+                "crop_url": f"/outputs/{clip_stem}/thumbnails/track_{tid:03d}.jpg",
+                "start_sec": round(float(t.get("start_time_seconds", 0.0) or 0.0), 2),
+                "end_sec": round(float(t.get("end_time_seconds", 0.0) or 0.0), 2),
+                "frame_count": int(t.get("frame_count", 0) or 0),
+            })
+        except Exception:
+            continue
+
+    web_video_url = f"/outputs/{clip_stem}/{clip_stem}_tracked_web.mp4"
     return {
         "job_id": clip_stem,
         "filename": video_path.name,
-        "video_url": f"/media/clips/{video_path.name}",
-        "fps": round(float(tracks_summary.get("video_fps", 30.0)), 2),
+        "video_url": web_video_url,
+        "tracked_video_url": web_video_url,
+        "raw_video_url": f"/media/clips/{video_path.name}",
+        "fps": round(fps_val, 2),
         "width": width,
         "height": height,
-        "total_frames": int(tracks_summary.get("total_frames", 0)),
+        "total_frames": int(tracks_summary.get("total_frames", 0) or 0),
         "boxes_url": f"/outputs/{clip_stem}/boxes.json",
         "tracks": tracks_list,
     }
@@ -363,7 +383,7 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             output_dir=clip_out_dir,
             imgsz=960,
             device=device,
-            write_video=False,
+            write_video=True,
         )
 
         JOBS[clip_stem].update({
@@ -371,18 +391,20 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             "progress": 40,
             "message": "Tracking vehicles with YOLO + BoT-SORT...",
         })
-        print(f"[STAGE 1] Running BoT-SORT GPU tracking on {video_path.name}...", flush=True)
-        summary = pipeline.run(str(video_path), write_video=False)
+        print(f"[STAGE 1] Running BoT-SORT GPU tracking on {video_path.name} (write_video=True)...", flush=True)
+        raw_video_name = f"{clip_stem}_tracked.mp4"
+        summary = pipeline.run(str(video_path), output_video_name=raw_video_name, write_video=True)
         print(f"[STAGE 1] Tracking complete: {len(summary.get('tracks', []))} clean vehicles recorded.", flush=True)
 
         JOBS[clip_stem].update({
             "stage_step": 3,
             "progress": 85,
-            "message": "Generating bounding boxes & thumbnails...",
+            "message": "Generating H.264 tracked web video & thumbnails...",
         })
-        print(f"[STAGE 1] Generating web bounding boxes and thumbnails...", flush=True)
+        print(f"[STAGE 1] Ensuring web H.264 video and thumbnails...", flush=True)
+        ensure_tracked_web_video(video_path, clip_out_dir, clip_stem)
         build_web_artifacts(clip_stem, clip_out_dir, video_path)
-        print(f"[STAGE 1] Web artifacts ready -> boxes.json + thumbnails generated.", flush=True)
+        print(f"[STAGE 1] Web artifacts ready -> tracked web video + thumbnails generated.", flush=True)
 
         summ_path = clip_out_dir / "tracks_summary.json"
         with open(summ_path, "r", encoding="utf-8") as f:
@@ -394,7 +416,7 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             "status": "ready",
             "stage_step": 3,
             "progress": 100,
-            "message": "Stage 1 tracking and web artifacts ready",
+            "message": "Stage 1 tracking and web video ready",
             "error": None,
             "result": result,
         })
@@ -408,6 +430,52 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             "stage_step": 0,
             "progress": 0,
             "message": f"Processing failed: {str(e)}",
+            "error": str(e),
+            "result": None,
+        }
+
+
+def _run_fast_render_job(clip_stem: str, video_path: Path):
+    """Fast Pass 2 rendering from track_history.json without re-running YOLO."""
+    try:
+        print(f"\n[STAGE 1 FAST] Rendering H.264 tracked video from history for {clip_stem}...", flush=True)
+        clip_out_dir = OUTPUTS_DIR / clip_stem
+        JOBS[clip_stem] = {
+            "job_id": clip_stem,
+            "status": "running",
+            "stage_step": 2,
+            "progress": 50,
+            "message": "Rendering 720p tracked preview video...",
+            "error": None,
+            "result": None,
+        }
+
+        ensure_tracked_web_video(video_path, clip_out_dir, clip_stem)
+        build_web_artifacts(clip_stem, clip_out_dir, video_path)
+
+        summ_path = clip_out_dir / "tracks_summary.json"
+        with open(summ_path, "r", encoding="utf-8") as f:
+            summ_data = json.load(f)
+
+        result = _build_stage1_result(clip_stem, video_path, summ_data)
+        JOBS[clip_stem] = {
+            "job_id": clip_stem,
+            "status": "ready",
+            "stage_step": 3,
+            "progress": 100,
+            "message": "Stage 1 tracking and web video ready",
+            "error": None,
+            "result": result,
+        }
+        print(f"[STAGE 1 FAST] Job '{clip_stem}' completed successfully in ~5s.\n", flush=True)
+    except Exception as e:
+        logger.error(f"Fast render failed for {clip_stem}: {e}", exc_info=True)
+        JOBS[clip_stem] = {
+            "job_id": clip_stem,
+            "status": "error",
+            "stage_step": 0,
+            "progress": 0,
+            "message": f"Video rendering failed: {str(e)}",
             "error": str(e),
             "result": None,
         }
@@ -775,13 +843,14 @@ async def select_local_video(payload: SelectLocalRequest = Body(...)) -> Dict[st
 
     clip_stem = video_path.stem
     clip_out_dir = OUTPUTS_DIR / clip_stem
-    boxes_path = clip_out_dir / "boxes.json"
+    web_tracked_path = clip_out_dir / f"{clip_stem}_tracked_web.mp4"
     summ_path = clip_out_dir / "tracks_summary.json"
+    hist_path = clip_out_dir / "track_history.json"
 
-    print(f"\n[API] select-local: '{fn}' (cached: {boxes_path.is_file() and summ_path.is_file()})", flush=True)
+    print(f"\n[API] select-local: '{fn}' (cached: {web_tracked_path.is_file() and summ_path.is_file()})", flush=True)
 
-    # Instant Cache Hit
-    if boxes_path.is_file() and summ_path.is_file() and not payload.force_refresh:
+    # 1. Instant Cache Hit: both summary and web H.264 video exist and non-empty
+    if web_tracked_path.is_file() and web_tracked_path.stat().st_size > 1000 and summ_path.is_file() and not payload.force_refresh:
         try:
             with open(summ_path, "r", encoding="utf-8") as f:
                 summ_data = json.load(f)
@@ -805,6 +874,22 @@ async def select_local_video(payload: SelectLocalRequest = Body(...)) -> Dict[st
     if existing and existing.get("status") in ("queued", "running") and not payload.force_refresh:
         return existing
 
+    # 2. Fast Pass 2 Cache Hit: summary and history exist, only need web video render
+    if summ_path.is_file() and hist_path.is_file() and not payload.force_refresh:
+        init_state = {
+            "job_id": clip_stem,
+            "status": "running",
+            "stage_step": 2,
+            "progress": 50,
+            "message": "Generating H.264 tracked preview video...",
+            "error": None,
+            "result": None,
+        }
+        JOBS[clip_stem] = init_state
+        STAGE1_EXECUTOR.submit(_run_fast_render_job, clip_stem, video_path)
+        return init_state
+
+    # 3. Fresh Full Stage 1 Run (write_video=True)
     init_state = {
         "job_id": clip_stem,
         "status": "queued",
@@ -832,10 +917,10 @@ async def get_video_status(job_id: str) -> Dict[str, Any]:
 
     # Check on disk
     clip_out_dir = OUTPUTS_DIR / job_stem
-    boxes_path = clip_out_dir / "boxes.json"
+    web_tracked_path = clip_out_dir / f"{job_stem}_tracked_web.mp4"
     summ_path = clip_out_dir / "tracks_summary.json"
 
-    if boxes_path.is_file() and summ_path.is_file():
+    if summ_path.is_file() and web_tracked_path.is_file() and web_tracked_path.stat().st_size > 1000:
         v_candidates = list(CLIPS_DIR.glob(f"{job_stem}.*"))
         v_path = v_candidates[0] if v_candidates else CLIPS_DIR / f"{job_stem}.mp4"
         try:

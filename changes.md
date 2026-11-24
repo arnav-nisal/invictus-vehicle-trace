@@ -513,5 +513,27 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - Pytest test suite verified at **87/87 passed (100%)** in 9.35s.
   - Full-stack contract verification script passed all 5 end-to-end endpoints against cached `file_07.mp4` Track 20.
 
+### 2026-11-24 13:20:00 IST — Final Demo Stabilization: H.264 Baked Stage 1 Playback, Tracks List UI & CLI Stage 4 Integration
+- **1. H.264 Browser-Safe Video Rendering (`cv_pipeline/video_renderer.py`, `cv_pipeline/pipeline.py`)**:
+  - Added `cv_pipeline/video_renderer.py` with `get_ffmpeg_executable()`, `transcode_to_h264()` (`libx264`, `yuv420p`, `+faststart`), `render_annotated_video_from_history()`, and `ensure_tracked_web_video()`.
+  - Updated `VehicleTrackingPipeline.run()` to transcode Pass 2 annotated output to `<clip_stem>_tracked_web.mp4` for native HTML5 browser playback and seeking.
+- **2. Backend 3-Tier Video Caching & PDF Image Resolution (`backend/main.py`, `backend/pdf_report.py`)**:
+  - Updated `POST /api/videos/select-local` and `GET /api/videos/{job_id}/status` with three-tier resolution: (1) instant cache hit when `<clip_stem>_tracked_web.mp4` and `tracks_summary.json` exist, (2) fast Pass 2 render (`_run_fast_render_job`) from `track_history.json` without re-running YOLO, and (3) fresh Stage 1 tracking (`write_video=True`).
+  - Added `tracked_video_url` and `raw_video_url` to `_build_stage1_result()` with defensive numeric/dimension parsing.
+  - Added `_resolve_image_path()` in `backend/pdf_report.py` to resolve `/outputs/...` and `/test_outputs/...` URLs as well as nested fallback crop folders for embedded PDF evidence images.
+- **3. Frontend Resilience, Tracks List Popover & Range Streaming (`frontend/`)**:
+  - Added `frontend/src/components/ErrorBoundary.tsx` and wrapped `App` (`frontend/src/App.tsx`) to recover gracefully from unexpected render errors.
+  - Upgraded `TrackSelectPage.tsx` to stream the Stage 1 H.264 annotated video directly via `<video>`, added an interactive **Tracks List** popover table with click-to-fill/seek, inline track summary badge, `Run Verification` action, and `AbortController` cleanup across `api.ts`.
+  - Hardened `InteractiveVideoCanvas.tsx` with dimension, `NaN`/`Infinity`, and animation-loop cancellation guards.
+  - Added HTTP `206 Partial Content` byte-range streaming support for `/outputs/` in `frontend/vite.config.ts`.
+- **4. End-to-End CLI Stage 4 Integration (`scripts/test_full_pipeline.py`) & Test Updates (`tests/test_web_api_and_pdf.py`)**:
+  - Integrated Stage 4 SQLite registry comparison (`run_stage_4_registry_and_report`) and forensic PDF generation into `scripts/test_full_pipeline.py` with `--skip-registry`, `--open-pdf`, and post-run interactive actions (`[p]`, `[c]`, `[v]`, `[b]`, `[q]`), and removed a duplicate input branch in `pick_video_interactively()`.
+  - Updated `cv_pipeline/crop_extractor.py` with `select_representative_frames()` and `max_crops` parameter.
+  - Updated `tests/test_web_api_and_pdf.py` to isolate Stage 1 cache-hit/status tests in `tmp_path` and added unit tests for Tier 2 fast rendering, `_resolve_image_path()`, and `ensure_tracked_web_video()`.
+- **5. Final Verification**:
+  - Full pytest suite verified at **103/103 passed (100%)** in 21.43s.
+  - Frontend `npx tsc --noEmit` and `npm run build` passed with exit code 0.
+
+
 
 

@@ -42,23 +42,26 @@ export interface Stage1Result {
   job_id: string;
   filename: string;
   video_url: string;
+  tracked_video_url?: string;
+  raw_video_url?: string;
   fps: number;
   width: number;
   height: number;
   total_frames: number;
-  boxes_url: string;
+  boxes_url?: string;
   tracks: Stage1Track[];
 }
 
-export type JobStatus = 'queued' | 'processing' | 'ready' | 'error';
+export type JobStatus = 'queued' | 'running' | 'processing' | 'ready' | 'error';
 
 export interface JobStatusResponse {
   job_id: string;
   status: JobStatus;
+  stage_step?: number;
   progress?: number;
   message?: string;
-  result?: Stage1Result;
-  error?: string;
+  result?: Stage1Result | null;
+  error?: string | null;
 }
 
 export interface GhostStackItem {

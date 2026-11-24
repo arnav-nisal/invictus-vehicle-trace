@@ -12,64 +12,114 @@ import {
  */
 export async function selectLocalVideo(
   filename: string,
-  forceRefresh = false
+  forceRefresh = false,
+  signal?: AbortSignal
 ): Promise<JobStatusResponse> {
   const res = await fetch('/api/videos/select-local', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filename, force_refresh: forceRefresh }),
+    signal,
   });
+
+  const contentType = res.headers.get('content-type') || '';
 
   if (!res.ok) {
     let detail = `Server responded with ${res.status}: ${res.statusText}`;
-    try {
-      const errJson = await res.json();
-      if (errJson && errJson.detail) {
-        detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+    if (contentType.includes('application/json')) {
+      try {
+        const errJson = await res.json();
+        if (errJson && errJson.detail) {
+          detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        }
+      } catch {
+        // Non-JSON error payload
       }
-    } catch {
-      // Non-JSON error payload
     }
     throw new Error(detail);
   }
 
-  return (await res.json()) as JobStatusResponse;
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Expected JSON response from select-local, but received ${contentType || 'non-JSON'}`);
+  }
+
+  const data = await res.json();
+  if (!data || typeof data !== 'object') {
+    throw new Error('Invalid JSON payload returned from /api/videos/select-local');
+  }
+
+  return data as JobStatusResponse;
 }
 
 /**
  * 2. GET /api/videos/{job_id}/status
  * Polls Stage 1 execution status from FastAPI backend.
  */
-export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(`/api/videos/${encodeURIComponent(jobId)}/status`);
+export async function getJobStatus(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<JobStatusResponse> {
+  if (!jobId || typeof jobId !== 'string' || jobId.trim() === '' || jobId === 'undefined') {
+    throw new Error(`Invalid jobId provided to getJobStatus: "${String(jobId)}"`);
+  }
+
+  const res = await fetch(`/api/videos/${encodeURIComponent(jobId)}/status`, {
+    signal,
+  });
+
+  const contentType = res.headers.get('content-type') || '';
 
   if (!res.ok) {
     let detail = `Status request failed (${res.status}: ${res.statusText})`;
-    try {
-      const errJson = await res.json();
-      if (errJson && errJson.detail) {
-        detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+    if (contentType.includes('application/json')) {
+      try {
+        const errJson = await res.json();
+        if (errJson && errJson.detail) {
+          detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        }
+      } catch {
+        // Non-JSON error payload
       }
-    } catch {
-      // Non-JSON error payload
     }
     throw new Error(detail);
   }
 
-  return (await res.json()) as JobStatusResponse;
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Expected JSON response from status endpoint, but received ${contentType || 'non-JSON'}`);
+  }
+
+  const data = await res.json();
+  if (!data || typeof data !== 'object') {
+    throw new Error(`Invalid JSON payload returned from status for job "${jobId}"`);
+  }
+
+  return data as JobStatusResponse;
 }
 
 /**
  * 3. GET boxes from boxes_url directly from backend / outputs.
  */
-export async function fetchBoxesData(boxesUrl: string): Promise<BoxesData> {
-  const res = await fetch(boxesUrl);
+export async function fetchBoxesData(
+  boxesUrl: string,
+  signal?: AbortSignal
+): Promise<BoxesData> {
+  if (!boxesUrl || typeof boxesUrl !== 'string') {
+    throw new Error(`Invalid boxesUrl provided: "${String(boxesUrl)}"`);
+  }
+
+  const res = await fetch(boxesUrl, { signal });
+  const contentType = res.headers.get('content-type') || '';
+
   if (!res.ok) {
     throw new Error(`Failed to load bounding boxes from ${boxesUrl} (${res.status} ${res.statusText})`);
   }
 
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Expected JSON bounding boxes from ${boxesUrl}, but received ${contentType || 'non-JSON'}`);
+  }
+
   const data = await res.json();
-  if (!data || typeof data !== 'object' || !data.frames) {
+  if (!data || typeof data !== 'object' || !data.frames || typeof data.frames !== 'object') {
     throw new Error(`Invalid bounding boxes payload received from ${boxesUrl}`);
   }
 
@@ -78,40 +128,88 @@ export async function fetchBoxesData(boxesUrl: string): Promise<BoxesData> {
 
 /**
  * 4. Polling helper: Polls GET /api/videos/{job_id}/status every 700ms
+ * Cancels cleanly via AbortSignal to avoid React dev mode double-mount leaks.
  */
 export async function pollStage1Job(
   jobId: string,
-  onProgress?: (statusResp: JobStatusResponse) => void
+  onProgress?: (statusResp: JobStatusResponse) => void,
+  signal?: AbortSignal
 ): Promise<Stage1Result> {
+  if (!jobId || typeof jobId !== 'string' || jobId.trim() === '' || jobId === 'undefined') {
+    throw new Error(`Cannot poll Stage 1 job with invalid jobId: "${String(jobId)}"`);
+  }
+
+  if (signal?.aborted) {
+    throw new DOMException('Polling aborted before start', 'AbortError');
+  }
+
   // First immediate status check
-  const initial = await getJobStatus(jobId);
+  const initial = await getJobStatus(jobId, signal);
+  if (signal?.aborted) {
+    throw new DOMException('Polling aborted', 'AbortError');
+  }
+
   if (onProgress) {
     onProgress(initial);
   }
+
   if (initial.status === 'ready' && initial.result) {
     return initial.result;
   }
   if (initial.status === 'error') {
-    throw new Error(initial.error || 'Stage 1 processing failed on server');
+    throw new Error(initial.error || initial.message || 'Stage 1 processing failed on server');
   }
 
-  return new Promise((resolve, reject) => {
-    const interval = setInterval(async () => {
+  return new Promise<Stage1Result>((resolve, reject) => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const cleanup = () => {
+      if (interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
+      if (signal) {
+        signal.removeEventListener('abort', handleAbort);
+      }
+    };
+
+    const handleAbort = () => {
+      cleanup();
+      reject(new DOMException('Polling aborted', 'AbortError'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', handleAbort, { once: true });
+    }
+
+    interval = setInterval(async () => {
+      if (signal?.aborted) {
+        cleanup();
+        reject(new DOMException('Polling aborted', 'AbortError'));
+        return;
+      }
+
       try {
-        const resp = await getJobStatus(jobId);
+        const resp = await getJobStatus(jobId, signal);
+
+        if (signal?.aborted) {
+          cleanup();
+          return;
+        }
+
         if (onProgress) {
           onProgress(resp);
         }
 
         if (resp.status === 'ready' && resp.result) {
-          clearInterval(interval);
+          cleanup();
           resolve(resp.result);
         } else if (resp.status === 'error') {
-          clearInterval(interval);
-          reject(new Error(resp.error || 'Stage 1 processing failed on server'));
+          cleanup();
+          reject(new Error(resp.error || resp.message || 'Stage 1 processing failed on server'));
         }
       } catch (err) {
-        clearInterval(interval);
+        cleanup();
         reject(err);
       }
     }, 700);
@@ -124,7 +222,8 @@ export async function pollStage1Job(
 export async function verifyPipeline(
   jobId: string,
   trackIds: number[],
-  forceRefresh = false
+  forceRefresh = false,
+  signal?: AbortSignal
 ): Promise<VerificationResult> {
   const payload: VerifyRequest = {
     job_id: jobId,
@@ -136,19 +235,28 @@ export async function verifyPipeline(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
+
+  const contentType = res.headers.get('content-type') || '';
 
   if (!res.ok) {
     let detail = `Verification endpoint failed (${res.status}: ${res.statusText})`;
-    try {
-      const errJson = await res.json();
-      if (errJson && errJson.detail) {
-        detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+    if (contentType.includes('application/json')) {
+      try {
+        const errJson = await res.json();
+        if (errJson && errJson.detail) {
+          detail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        }
+      } catch {
+        // Non-JSON error payload
       }
-    } catch {
-      // Non-JSON error payload
     }
     throw new Error(detail);
+  }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Expected JSON from /api/pipeline/verify, but received ${contentType || 'non-JSON'}`);
   }
 
   return (await res.json()) as VerificationResult;

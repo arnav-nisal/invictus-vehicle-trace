@@ -85,6 +85,53 @@ def apply_enhancement_pipeline(
     return enhanced
 
 
+def select_representative_frames(
+    observations: List[Dict[str, Any]],
+    max_crops: int = 40,
+) -> List[Dict[str, Any]]:
+    """Select up to max_crops observations preserving full temporal coverage AND peak close-up size.
+
+    Combines uniform temporal sampling across the track's lifespan with the top largest-area
+    detections (where the vehicle is closest and sharpest), sorted chronologically.
+    """
+    total = len(observations)
+    if max_crops is None or max_crops <= 0 or total <= max_crops:
+        return observations
+
+    # Half allocated to uniform temporal sampling across lifespan (start, end, and steps between)
+    n_temporal = max(1, max_crops // 2)
+    temporal_indices = set(
+        int(round(i))
+        for i in np.linspace(0, total - 1, n_temporal)
+    )
+
+    # Sort all observation indices by bbox area descending
+    def get_area(idx: int) -> float:
+        obs = observations[idx]
+        b = obs.get("bbox", [0, 0, 0, 0])
+        return max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+
+    sorted_by_area = sorted(range(total), key=get_area, reverse=True)
+
+    # Add largest-area indices not already selected until reaching max_crops
+    selected_indices = set(temporal_indices)
+    for idx in sorted_by_area:
+        if len(selected_indices) >= max_crops:
+            break
+        selected_indices.add(idx)
+
+    # Fill any remaining slots if needed
+    if len(selected_indices) < max_crops:
+        for idx in range(total):
+            if len(selected_indices) >= max_crops:
+                break
+            selected_indices.add(idx)
+
+    # Sort selected indices chronologically
+    sorted_indices = sorted(selected_indices)
+    return [observations[i] for i in sorted_indices]
+
+
 def parse_target_ids(val: Union[int, str, List[Any]]) -> list[int]:
     """Parses a target ID input (int, comma-separated str '26, 64', or list) into a list of unique ints."""
     if isinstance(val, int):
@@ -115,6 +162,7 @@ def extract_vehicle_crops(
     output_dir: Union[str, Path] = "outputs",
     padding_pct: float = 0.08,
     crop_video_path: Optional[Union[str, Path]] = None,
+    max_crops: int = 40,
 ) -> Dict[str, Any]:
     """Extract and save all cropped images for a specified vehicle track across every frame it appears in.
 

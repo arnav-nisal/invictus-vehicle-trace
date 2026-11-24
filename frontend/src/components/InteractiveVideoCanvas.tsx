@@ -30,132 +30,197 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
   // Handle external seek requests
   useEffect(() => {
     if (seekTime !== null && seekTime !== undefined && videoRef.current) {
-      videoRef.current.currentTime = seekTime;
-      setCurrentTime(seekTime);
+      const safeSeek = Number(seekTime);
+      if (!isNaN(safeSeek) && isFinite(safeSeek)) {
+        videoRef.current.currentTime = safeSeek;
+        setCurrentTime(safeSeek);
+      }
     }
   }, [seekTime]);
 
   const drawOverlay = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    const rect = video.getBoundingClientRect();
-    if (canvas.width !== rect.width || canvas.height !== rect.height) {
-      canvas.width = rect.width;
-      canvas.height = rect.height;
+      // Defensive guard 1: video dimensions must be valid and loaded
+      const vw = Number(video.videoWidth);
+      const vh = Number(video.videoHeight);
+      if (!vw || !vh || vw <= 0 || vh <= 0) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      // Defensive guard 2: canvas client bounding box
+      const rect = video.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      if (canvas.width !== rect.width || canvas.height !== rect.height) {
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Defensive guard 3: boxesData & frames lookup
+      if (!boxesData || !boxesData.frames || typeof boxesData.frames !== 'object') {
+        return;
+      }
+
+      // Defensive guard 4: fps and native canvas dimensions
+      const fps = Number(boxesData.fps) > 0 ? Number(boxesData.fps) : 30;
+      const nativeW = Number(boxesData.width) > 0 ? Number(boxesData.width) : (vw || 1920);
+      const nativeH = Number(boxesData.height) > 0 ? Number(boxesData.height) : (vh || 1080);
+
+      if (nativeW <= 0 || nativeH <= 0 || canvas.width <= 0 || canvas.height <= 0) {
+        return;
+      }
+
+      // Defensive guard 5: safe currentTime & frame index lookup
+      const curTime = Number(video.currentTime);
+      if (isNaN(curTime) || !isFinite(curTime) || curTime < 0) {
+        return;
+      }
+
+      const currentFrameIdx = Math.floor(curTime * fps);
+      const frameBoxes = boxesData.frames[String(currentFrameIdx)];
+      if (!Array.isArray(frameBoxes)) {
+        return;
+      }
+
+      const scaleX = canvas.width / nativeW;
+      const scaleY = canvas.height / nativeH;
+      if (!isFinite(scaleX) || !isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+        return;
+      }
+
+      const hasSelection = Array.isArray(selectedTrackIds) && selectedTrackIds.length > 0;
+
+      // Helper to draw clean numbered pill
+      const drawIdPill = (id: number, x: number, y: number, isSelected: boolean) => {
+        const text = `#${id}`;
+        ctx.font = 'bold 10px "JetBrains Mono", monospace, monospace';
+        const textMetrics = ctx.measureText(text);
+        const textWidth = textMetrics.width;
+        const pillW = textWidth + 8;
+        const pillH = 15;
+        const pillX = x;
+        const pillY = y >= pillH ? y - pillH : y;
+
+        ctx.save();
+        ctx.fillStyle = isSelected ? '#10B981' : 'rgba(17, 17, 17, 0.88)';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(pillX, pillY, pillW, pillH, 3);
+        } else {
+          ctx.rect(pillX, pillY, pillW, pillH);
+        }
+        ctx.fill();
+
+        if (!isSelected) {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+          ctx.lineWidth = 0.75;
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, pillX + 4, pillY + pillH / 2 + 0.5);
+        ctx.restore();
+      };
+
+      frameBoxes.forEach((box: FrameBox) => {
+        // Defensive guard 6: frame box and 4-tuple coordinate validation
+        if (!box || !Array.isArray(box.bbox) || box.bbox.length !== 4) {
+          return;
+        }
+
+        const [x1, y1, x2, y2] = box.bbox;
+        if (!isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) {
+          return;
+        }
+
+        const bx = x1 * scaleX;
+        const by = y1 * scaleY;
+        const bw = (x2 - x1) * scaleX;
+        const bh = (y2 - y1) * scaleY;
+
+        if (!isFinite(bx) || !isFinite(by) || !isFinite(bw) || !isFinite(bh)) {
+          return;
+        }
+
+        const isSelected = hasSelection && selectedTrackIds.includes(box.track_id);
+
+        ctx.save();
+
+        if (isSelected) {
+          // Vivid Deep Emerald #10B981 2.5px stroke + soft fill
+          ctx.fillStyle = 'rgba(16, 185, 129, 0.16)';
+          ctx.fillRect(bx, by, bw, bh);
+
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+          ctx.shadowBlur = 4;
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = '#10B981';
+          ctx.strokeRect(bx, by, bw, bh);
+
+          drawIdPill(box.track_id, bx, by, true);
+        } else {
+          // Clean subtle white outline with dark shadow halo
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+          ctx.shadowBlur = 2.5;
+          ctx.lineWidth = 1.25;
+          ctx.strokeStyle = hasSelection
+            ? 'rgba(255, 255, 255, 0.35)'
+            : 'rgba(255, 255, 255, 0.85)';
+          ctx.strokeRect(bx, by, bw, bh);
+
+          drawIdPill(box.track_id, bx, by, false);
+        }
+
+        ctx.restore();
+      });
+    } catch (err) {
+      // Never allow overlay exceptions to crash the frame loop or React tree
+      console.warn('InteractiveVideoCanvas: overlay render skipped due to exception:', err);
     }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!boxesData) return;
-
-    const fps = boxesData.fps || 30;
-    const nativeW = boxesData.width || 1920;
-    const nativeH = boxesData.height || 1080;
-
-    const currentFrameIdx = Math.floor(video.currentTime * fps);
-    const activeBoxes: FrameBox[] = boxesData.frames[String(currentFrameIdx)] || [];
-
-    const scaleX = canvas.width / nativeW;
-    const scaleY = canvas.height / nativeH;
-
-    const hasSelection = selectedTrackIds.length > 0;
-
-    // Helper to draw clean numbered pill
-    const drawIdPill = (id: number, x: number, y: number, isSelected: boolean) => {
-      const text = `#${id}`;
-      ctx.font = 'bold 10px "JetBrains Mono", monospace, monospace';
-      const textMetrics = ctx.measureText(text);
-      const textWidth = textMetrics.width;
-      const pillW = textWidth + 8;
-      const pillH = 15;
-      const pillX = x;
-      const pillY = y >= pillH ? y - pillH : y;
-
-      ctx.save();
-      ctx.fillStyle = isSelected ? '#10B981' : 'rgba(17, 17, 17, 0.88)';
-      ctx.beginPath();
-      if (ctx.roundRect) {
-        ctx.roundRect(pillX, pillY, pillW, pillH, 3);
-      } else {
-        ctx.rect(pillX, pillY, pillW, pillH);
-      }
-      ctx.fill();
-
-      if (!isSelected) {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 0.75;
-        ctx.stroke();
-      }
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(text, pillX + 4, pillY + pillH / 2 + 0.5);
-      ctx.restore();
-    };
-
-    activeBoxes.forEach((box) => {
-      const [x1, y1, x2, y2] = box.bbox;
-      const bx = x1 * scaleX;
-      const by = y1 * scaleY;
-      const bw = (x2 - x1) * scaleX;
-      const bh = (y2 - y1) * scaleY;
-
-      const isSelected = selectedTrackIds.includes(box.track_id);
-
-      ctx.save();
-
-      if (isSelected) {
-        // Vivid Deep Emerald #10B981 2.5px stroke + soft fill
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.16)';
-        ctx.fillRect(bx, by, bw, bh);
-
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-        ctx.shadowBlur = 4;
-        ctx.lineWidth = 2.5;
-        ctx.strokeStyle = '#10B981';
-        ctx.strokeRect(bx, by, bw, bh);
-
-        drawIdPill(box.track_id, bx, by, true);
-      } else {
-        // Clean subtle white outline with dark shadow halo
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-        ctx.shadowBlur = 2.5;
-        ctx.lineWidth = 1.25;
-        ctx.strokeStyle = hasSelection
-          ? 'rgba(255, 255, 255, 0.35)'
-          : 'rgba(255, 255, 255, 0.85)';
-        ctx.strokeRect(bx, by, bw, bh);
-
-        drawIdPill(box.track_id, bx, by, false);
-      }
-
-      ctx.restore();
-    });
   }, [boxesData, selectedTrackIds]);
 
-  // Synchronized animation loop
+  // Synchronized animation loop with cancellation guard
   useEffect(() => {
     let animId: number;
+    let isCancelled = false;
+
     const renderLoop = () => {
+      if (isCancelled) return;
       drawOverlay();
       animId = requestAnimationFrame(renderLoop);
     };
 
     animId = requestAnimationFrame(renderLoop);
-    return () => cancelAnimationFrame(animId);
+
+    return () => {
+      isCancelled = true;
+      if (animId) {
+        cancelAnimationFrame(animId);
+      }
+    };
   }, [drawOverlay]);
 
   // Video metadata and playback events
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (!video) return;
-    setDuration(video.duration);
-    if (video.duration > 0.5 && currentTime === 0) {
+    const dur = Number(video.duration);
+    const validDur = isNaN(dur) || !isFinite(dur) ? 0 : dur;
+    setDuration(validDur);
+    if (validDur > 0.5 && currentTime === 0) {
       video.currentTime = 0.5;
       setCurrentTime(0.5);
     }
@@ -164,7 +229,10 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
 
   const handleTimeUpdate = () => {
     if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
+      const cur = Number(videoRef.current.currentTime);
+      if (!isNaN(cur) && isFinite(cur)) {
+        setCurrentTime(cur);
+      }
     }
   };
 
@@ -191,7 +259,7 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const targetTime = parseFloat(e.target.value);
     const video = videoRef.current;
-    if (video) {
+    if (video && !isNaN(targetTime) && isFinite(targetTime)) {
       video.currentTime = targetTime;
       setCurrentTime(targetTime);
       drawOverlay();
@@ -199,7 +267,7 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
   };
 
   const handleSpeedChange = (speed: number) => {
-    if (videoRef.current) {
+    if (videoRef.current && isFinite(speed) && speed > 0) {
       videoRef.current.playbackRate = speed;
       setPlaybackSpeed(speed);
     }
@@ -222,21 +290,27 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
   }, []);
 
   const formatTime = (sec: number) => {
+    if (isNaN(sec) || !isFinite(sec) || sec < 0) return '00:00.0';
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     const ms = Math.floor((sec % 1) * 10);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
   };
 
-  const currentFrame = boxesData ? Math.floor(currentTime * (boxesData.fps || 30)) : 0;
-  const totalFrames = boxesData?.total_frames || (duration ? Math.floor(duration * 30) : 300);
+  const safeCurrentTime = Number(currentTime) || 0;
+  const safeFps = Number(boxesData?.fps) > 0 ? Number(boxesData?.fps) : 30;
+  const currentFrame = boxesData ? Math.floor(safeCurrentTime * safeFps) : 0;
+  const safeDuration = Number(duration) || 0;
+  const totalFrames = Number(boxesData?.total_frames) > 0
+    ? Number(boxesData?.total_frames)
+    : (safeDuration > 0 ? Math.floor(safeDuration * safeFps) : 300);
 
   return (
     <div
       ref={containerRef}
       className="relative flex-1 min-h-0 flex flex-col bg-white rounded-2xl border border-[#E6E6E2] overflow-hidden shadow-[0_2px_12px_rgba(0,0,0,0.03)]"
     >
-      {/* Fullscreen Video Area with Crisp Numbered Canvas (No hit testing / default cursor) */}
+      {/* Fullscreen Video Area with Crisp Numbered Canvas */}
       <div className="relative flex-1 min-h-0 w-full bg-[#111111] overflow-hidden flex items-center justify-center select-none">
         <video
           ref={videoRef}
@@ -272,9 +346,9 @@ export const InteractiveVideoCanvas: React.FC<InteractiveVideoCanvasProps> = ({
           <input
             type="range"
             min={0}
-            max={duration || 10}
+            max={safeDuration || 10}
             step={0.033}
-            value={currentTime}
+            value={safeCurrentTime}
             onChange={handleSeek}
             aria-label="Video scrubber"
             className="w-full h-1.5 bg-[#F1F1EE] rounded-lg appearance-none cursor-pointer accent-[#111111] focus:outline-none"

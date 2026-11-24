@@ -520,6 +520,15 @@ class VehicleTrackingPipeline:
             writer.release()
             logger.info(f"Pass 2 complete. Video saved: {output_video_path}")
 
+            # Transcode to web-safe H.264
+            try:
+                from cv_pipeline.video_renderer import transcode_to_h264
+                clip_stem = Path(video_path).stem
+                web_video_path = self.output_dir / f"{clip_stem}_tracked_web.mp4"
+                transcode_to_h264(output_video_path, web_video_path)
+            except Exception as e:
+                logger.warning(f"Could not transcode tracked video to web H.264: {e}")
+
             # Create alias for activa_signal if needed
             alias_video_path = self.output_dir / "annotated_activa_signal.mp4"
             if "activa_signal" in video_path.stem and output_video_path != alias_video_path:
