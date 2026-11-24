@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, Tuple
+from typing import Dict, Any, Optional, Union, Tuple, List
 import cv2
 import numpy as np
 
@@ -85,10 +85,33 @@ def apply_enhancement_pipeline(
     return enhanced
 
 
+def parse_target_ids(val: Union[int, str, List[Any]]) -> list[int]:
+    """Parses a target ID input (int, comma-separated str '26, 64', or list) into a list of unique ints."""
+    if isinstance(val, int):
+        return [val]
+    if isinstance(val, (list, tuple)):
+        res = []
+        for x in val:
+            for item in parse_target_ids(x):
+                if item not in res:
+                    res.append(item)
+        return res
+    if isinstance(val, str):
+        cleaned = val.strip().lstrip("[").rstrip("]")
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+        res = []
+        for p in parts:
+            tid = int(p)
+            if tid not in res:
+                res.append(tid)
+        return res
+    raise TypeError(f"Cannot parse target_id from type {type(val)}: {val}")
+
+
 def extract_vehicle_crops(
     video_path: Union[str, Path],
     track_history: Dict[str, Any],
-    target_id: int,
+    target_id: Union[int, str, List[Any]],
     output_dir: Union[str, Path] = "outputs",
     padding_pct: float = 0.08,
     crop_video_path: Optional[Union[str, Path]] = None,
@@ -101,6 +124,7 @@ def extract_vehicle_crops(
       - vehicle_crops_enhanced/: Enlarged with identical scaling + bilateral filter + luminance CLAHE + unsharp mask.
 
     Supports optional high-resolution source mapping via --crop-video.
+    Supports single ID or comma-separated / list of merged IDs (e.g. [26, 64]).
     """
     track_video_path = Path(video_path)
     if not track_video_path.exists():
@@ -114,26 +138,62 @@ def extract_vehicle_crops(
     else:
         actual_crop_video_path = track_video_path
 
-    tracks_dict = track_history.get("tracks", {})
-    target_str_id = str(target_id)
-    if target_str_id not in tracks_dict:
-        available_ids = sorted([int(k) for k in tracks_dict.keys()])
-        raise ValueError(
-            f"Target ID {target_id} not found in track history. Available IDs: {available_ids}"
-        )
+    target_ids = parse_target_ids(target_id)
+    if not target_ids:
+        raise ValueError("No target IDs provided.")
 
-    track_info = tracks_dict[target_str_id]
-    observations = track_info.get("observations", [])
+    tracks_dict = track_history.get("tracks", {})
+    available_ids = sorted([int(k) for k in tracks_dict.keys()])
+
+    for tid in target_ids:
+        if str(tid) not in tracks_dict:
+            raise ValueError(
+                f"Target ID {tid} not found in track history. Available IDs: {available_ids}"
+            )
+
+    primary_id = target_ids[0]
+    is_merged = len(target_ids) > 1
+    primary_track = tracks_dict[str(primary_id)]
+
+    # Pool observations chronologically; deduplicate overlapping frames by highest confidence
+    frame_to_obs = {}
+    for tid in target_ids:
+        for obs in tracks_dict[str(tid)].get("observations", []):
+            f_idx = obs["frame_idx"]
+            conf = float(obs.get("confidence", 0.0))
+            if f_idx not in frame_to_obs:
+                obs_copy = dict(obs)
+                obs_copy["source_track_id"] = tid
+                frame_to_obs[f_idx] = obs_copy
+            else:
+                existing_conf = float(frame_to_obs[f_idx].get("confidence", 0.0))
+                if conf > existing_conf:
+                    obs_copy = dict(obs)
+                    obs_copy["source_track_id"] = tid
+                    frame_to_obs[f_idx] = obs_copy
+
+    observations = [frame_to_obs[f] for f in sorted(frame_to_obs.keys())]
     if not observations:
-        raise ValueError(f"Track {target_id} has no recorded frame observations.")
+        raise ValueError(f"Target track(s) {target_ids} have no recorded frame observations.")
+
+    # Filter to pure non-interpolated true YOLO detections for Stage 2/3 cropping
+    # Fallback to all observations only if no non-interpolated frames exist
+    pure_obs = [obs for obs in observations if not obs.get("interpolated", False)]
+    if pure_obs:
+        observations = pure_obs
 
     # Determine dedicated output folder for this track: outputs/<clip_name>/track_<ID>/
     clip_name = track_video_path.stem
     output_dir = Path(output_dir)
-    if output_dir.name == clip_name:
-        track_dir = output_dir / f"track_{target_id:03d}"
+    if is_merged:
+        track_folder_name = f"track_{'_'.join(f'{tid:03d}' for tid in target_ids)}"
     else:
-        track_dir = output_dir / clip_name / f"track_{target_id:03d}"
+        track_folder_name = f"track_{primary_id:03d}"
+
+    if output_dir.name == clip_name:
+        track_dir = output_dir / track_folder_name
+    else:
+        track_dir = output_dir / clip_name / track_folder_name
 
     raw_crops_dir = track_dir / "vehicle_crops_raw"
     unenhanced_crops_dir = track_dir / "vehicle_crops_unenhanced"
@@ -183,8 +243,9 @@ def extract_vehicle_crops(
     sharpness_scores = []
     usable_count = 0
 
+    target_desc = f"{target_ids}" if is_merged else f"{primary_id}"
     logger.info(
-        f"Extracting {len(observations)} crops for Track {target_id} ({track_info['class_name']}) with {padding_pct*100:.0f}% padding across 3 tiers..."
+        f"Extracting {len(observations)} crops for Track {target_desc} ({primary_track.get('class_name', 'vehicle')}) with {padding_pct*100:.0f}% padding across 3 tiers..."
     )
 
     curr_crop_frame_idx = -1
@@ -320,6 +381,7 @@ def extract_vehicle_crops(
             "enhanced_path": str(enhanced_crop_path.as_posix()),
             "confidence": float(obs.get("confidence", 0.0)),
             "area": round(float(bw * bh), 1),
+            "interpolated": bool(obs.get("interpolated", False)),
         }
         manifest_crops.append(manifest_entry)
 
@@ -328,13 +390,16 @@ def extract_vehicle_crops(
     avg_sharpness = round(sum(sharpness_scores) / len(sharpness_scores), 2) if sharpness_scores else 0.0
 
     manifest_data = {
-        "track_id": int(target_id),
-        "class_name": track_info.get("class_name", "vehicle"),
-        "category": track_info.get("category", "vehicle"),
-        "start_frame": track_info.get("start_frame"),
-        "end_frame": track_info.get("end_frame"),
-        "start_timestamp": track_info.get("start_timestamp"),
-        "end_timestamp": track_info.get("end_timestamp"),
+        "track_id": int(primary_id),
+        "target_id": int(primary_id),
+        "merged_track_ids": target_ids,
+        "is_merged_track": is_merged,
+        "class_name": primary_track.get("class_name", "vehicle"),
+        "category": primary_track.get("category", "vehicle"),
+        "start_frame": observations[0]["frame_idx"] if observations else None,
+        "end_frame": observations[-1]["frame_idx"] if observations else None,
+        "start_timestamp": observations[0].get("timestamp", "") if observations else "",
+        "end_timestamp": observations[-1].get("timestamp", "") if observations else "",
         "total_crops_saved": len(manifest_crops),
         "usable_crops_count": usable_count,
         "avg_sharpness_score": avg_sharpness,
@@ -344,7 +409,7 @@ def extract_vehicle_crops(
         "raw_crops_dir": str(raw_crops_dir.as_posix()),
         "unenhanced_crops_dir": str(unenhanced_crops_dir.as_posix()),
         "enhanced_crops_dir": str(enhanced_crops_dir.as_posix()),
-        "original_ids": track_info.get("original_ids", [target_id]),
+        "original_ids": target_ids if is_merged else primary_track.get("original_ids", [primary_id]),
         "crops": manifest_crops,
     }
 
@@ -389,7 +454,8 @@ def display_crop_comparison_summary(manifest: Dict[str, Any]):
         return
 
     print("\n" + "=" * 105)
-    print(f"  STAGE 2 THREE-TIER CROP QUALITY REPORT: TRACK {manifest['track_id']} ({manifest['class_name'].upper()})")
+    merged_info = f" (MERGED: {manifest['merged_track_ids']})" if manifest.get("is_merged_track") else ""
+    print(f"  STAGE 2 THREE-TIER CROP QUALITY REPORT: TRACK {manifest['track_id']}{merged_info} ({manifest.get('class_name', 'vehicle').upper()})")
     print("=" * 105)
     print(f"  Total Crops:        {manifest['total_crops_saved']} frames (Lossless .png)")
     print(f"  Usable Frames:      {manifest['usable_crops_count']} / {manifest['total_crops_saved']}")
@@ -439,7 +505,7 @@ def interactive_vehicle_selection(
     track_history: Dict[str, Any],
     video_path: Union[str, Path],
     output_dir: Union[str, Path] = "outputs",
-    target_id: Optional[int] = None,
+    target_id: Optional[Union[int, str, List[Any]]] = None,
     padding_pct: float = 0.08,
     crop_video_path: Optional[Union[str, Path]] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -465,14 +531,14 @@ def interactive_vehicle_selection(
     for t in summary_data.get("tracks", []):
         available_ids.add(int(t["id"]))
 
-    chosen_id = target_id
+    chosen_ids = None
 
     # If target_id is not passed, prompt interactively
-    if chosen_id is None:
+    if target_id is None:
         while True:
             try:
                 user_input = input(
-                    "Enter the Tracking ID spotted in the video to extract all crops (or 'q' to quit): "
+                    "Enter the Tracking ID (or comma-separated IDs, e.g. 26, 64) spotted in the video (or 'q' to quit): "
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nSelection canceled.")
@@ -482,28 +548,33 @@ def interactive_vehicle_selection(
                 print("Exiting vehicle crop extraction.")
                 return None
 
-            if not user_input.isdigit():
-                print("Please enter a valid numeric tracking ID.")
+            try:
+                parsed_ids = parse_target_ids(user_input)
+            except Exception:
+                print("Please enter valid numeric tracking ID(s), e.g. '26' or '26, 64'.")
                 continue
 
-            parsed_id = int(user_input)
-            if parsed_id not in available_ids:
-                print(f"Track ID {parsed_id} is not in the detected list. Available IDs: {sorted(available_ids)}")
+            invalid_ids = [tid for tid in parsed_ids if tid not in available_ids]
+            if invalid_ids:
+                print(f"Track ID(s) {invalid_ids} not in detected list. Available IDs: {sorted(available_ids)}")
                 continue
 
-            chosen_id = parsed_id
+            chosen_ids = parsed_ids
             break
+    else:
+        chosen_ids = parse_target_ids(target_id)
+        invalid_ids = [tid for tid in chosen_ids if tid not in available_ids]
+        if invalid_ids:
+            raise ValueError(
+                f"Specified target ID(s) {invalid_ids} not in detected vehicle tracks. Available IDs: {sorted(available_ids)}"
+            )
 
-    if chosen_id not in available_ids:
-        raise ValueError(
-            f"Specified target ID {chosen_id} is not in detected vehicle tracks. Available IDs: {sorted(available_ids)}"
-        )
-
-    print(f"\nProcessing lossless full-track crops across 3 tiers for selected Vehicle Track ID: {chosen_id}...")
+    target_desc = f"{chosen_ids}" if len(chosen_ids) > 1 else f"{chosen_ids[0]}"
+    print(f"\nProcessing lossless full-track crops across 3 tiers for selected Vehicle Track ID(s): {target_desc}...")
     manifest = extract_vehicle_crops(
         video_path=video_path,
         track_history=track_history,
-        target_id=chosen_id,
+        target_id=chosen_ids,
         output_dir=output_dir,
         padding_pct=padding_pct,
         crop_video_path=crop_video_path,

@@ -14,7 +14,7 @@ match_thresh: 0.72       # Tightened matching threshold (0.72) to prevent jumpin
 fuse_score: True         # Weight association by detection confidence
 
 # Fixed CCTV camera setting
-gmc_method: none         # Camera-motion compensation disabled for fixed CCTV
+gmc_method: None         # Camera-motion compensation disabled for fixed CCTV
 
 # Appearance Re-ID settings
 # Rely on motion Kalman filter + IoU association so 90-degree turns do not split IDs

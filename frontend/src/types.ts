@@ -1,124 +1,157 @@
-// TypeScript types for Invictus Vehicle Trace Surveillance Dashboard (AIML-01)
-
-export type BodyType = 'car' | 'suv' | 'two-wheeler' | 'auto-rickshaw' | 'truck' | 'bus';
-
-export interface TrackSummary {
-  track_id: number;
-  coarse_class: string;
-  first_sec: number;
-  last_sec: number;
-  frames_seen: number;
-  thumbnail_url?: string | null;
+export interface ClipItem {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  video_url: string;
+  width?: number;
+  height?: number;
+  duration_sec?: number;
 }
 
-export interface VideoScanResponse {
-  video_id?: string | null;
-  video_path?: string | null;
-  duration_seconds: number;
-  total_frames: number;
+export interface LocalClipsResponse {
+  directory: string;
+  clips: ClipItem[];
+}
+
+export type StepType = 'intake' | 'target' | 'verify';
+
+export interface Stage1Track {
+  track_id: number;
+  vehicle_class: string;
+  category: string;
+  crop_url: string;
+  start_sec: number;
+  end_sec: number;
+  frame_count: number;
+}
+
+export interface FrameBox {
+  track_id: number;
+  bbox: [number, number, number, number]; // [x1, y1, x2, y2]
+}
+
+export interface BoxesData {
   fps: number;
-  tracks_count: number;
-  tracks: TrackSummary[];
+  width: number;
+  height: number;
+  total_frames?: number;
+  frames: Record<string, FrameBox[]>;
 }
 
-export interface FrameEvidence {
-  frame_idx: number;
-  timestamp_sec?: number | null;
-  image_path: string;
-  plate_crop_path?: string | null;
-  ocr_text?: string | null;
-  confidence: number;
+export interface Stage1Result {
+  job_id: string;
+  filename: string;
+  video_url: string;
+  fps: number;
+  width: number;
+  height: number;
+  total_frames: number;
+  boxes_url: string;
+  tracks: Stage1Track[];
 }
 
-export interface VehicleEvidence {
-  track_id: number;
-  consensus_plate: string;
-  /** False when no plate was detected (visual-only tracking mode). */
-  plate_detected?: boolean;
-  char_confidences: number[];
+export type JobStatus = 'queued' | 'processing' | 'ready' | 'error';
+
+export interface JobStatusResponse {
+  job_id: string;
+  status: JobStatus;
+  progress?: number;
+  message?: string;
+  result?: Stage1Result;
+  error?: string;
+}
+
+export interface GhostStackItem {
+  char: string;
+  soft_score: number;
+  kind: 'ghost_fill' | 'conflict_alt';
+  sources: string[];
+}
+
+export interface ReconciledSlot {
+  slot_idx: number;
+  expected_type: string;
+  final_char: string;
+  final_confidence: number;
+  action: string;
+  ui_tile_tone: 'green' | 'black' | 'unknown';
+  pipe_a_char?: string | null;
+  pipe_b_char?: string | null;
+  vlm_char?: string | null;
+  ghost_stack: GhostStackItem[];
+}
+
+export interface GhostPrediction {
+  rank: number;
+  plate: string;
+  soft_score: number;
+  state_code_valid: boolean;
+  ghost_slot_indices: number[];
+}
+
+export interface VehicleAttributes {
+  body_type: string;
+  body_type_conf: number;
   colour: string;
   colour_conf: number;
-  body_type: BodyType;
-  body_type_conf: number;
-  make?: string;
-  make_conf?: number;
-  model?: string;
-  model_conf?: number;
-  frames_used: FrameEvidence[];
-  /** RTO spatial prior probability distribution, e.g. {"MH14": 0.80, "MH12": 0.12}. */
-  rto_priors?: Record<string, number> | null;
-  warning?: string | null;
+  make: string;
+  make_conf: number;
+  model: string;
+  model_conf: number;
+  provider_used: string;
+  selected_crops: string[];
 }
 
-export interface ScoreBreakdown {
-  plate_score: number;
-  colour_score: number;
-  body_type_score: number;
-  make_model_score: number;
-}
-
-export interface MatchCandidate {
+export interface RegistryMatch {
   rank: number;
   plate_number: string;
+  total_confidence: number;
+  plate_score: number;
+  visual_score: number;
   body_type: string;
   colour: string;
   make: string;
   model: string;
-  rto_city: string;
-  synthetic_owner_id: string;
-  owner_name?: string | null;
-  registered_rto?: string | null;
-  registration_year?: number | null;
-  watchlist_status: 'CLEAR' | 'STOLEN' | 'FLAGGED' | string;
-  composite_score: number;
-  /** Forensic total confidence (plate + rto + visual fusion). */
-  total_confidence: number;
-  /** Plate-only score from OCR confusion-aware alignment. */
-  plate_score?: number | null;
-  /** RTO spatial prior score. */
-  rto_prior_score?: number | null;
-  /** Visual VLM attribute score. */
-  visual_score?: number | null;
-  /** Character-by-character alignment diff string from backend. */
-  character_diff?: string | null;
-  /** Forensic anomaly flags, e.g. ["SUSPECTED_CLONED_PLATE"]. */
-  anomaly_flags: string[];
-  score_breakdown: ScoreBreakdown;
-  match_reasons: string[];
+  owner_name: string;
+  registered_rto: string;
+  registration_year: number;
+  sightings?: { camera_id: string; timestamp: string; location?: string }[];
 }
 
-export interface SightingRecord {
-  sighting_id: number;
-  track_id?: number | null;
-  camera_id: string;
-  timestamp: string;
-  top_matched_plate: string;
-  confidence: number;
-  crop_path?: string | null;
+export interface EvidenceUrls {
+  best_vehicle_crop_url?: string | null;
+  vehicle_contact_strip_url?: string | null;
+  clearest_plate_crop_url?: string | null;
+  plate_grid_unenhanced_url?: string | null;
+  plate_grid_enhanced_url?: string | null;
 }
 
-export interface AnalysisResponse {
-  track_id: number;
-  evidence: VehicleEvidence;
-  top_matches: MatchCandidate[];
-  no_confident_match: boolean;
-  explanation?: string | null;
-  warning?: string | null;
+export interface VerificationResult {
+  case_id: string;
+  job_id: string;
+  track_key: string;
+  filename: string;
+  target_id: number;
+  merged_track_ids: number[];
+  is_merged_track: boolean;
+  generated_at: string;
+  processing_time_sec: number;
+  plate: {
+    final_plate: string;
+    overall_confidence: number;
+    valid_state_code: boolean;
+    provider_used: string;
+    reconciled_slots: ReconciledSlot[];
+    ghost_predictions: GhostPrediction[];
+  };
+  vehicle: VehicleAttributes;
+  registry_matches: RegistryMatch[];
+  evidence_urls: EvidenceUrls;
+  pdf_report_url: string;
 }
 
-export interface DemoScenario {
-  id: string;
-  title: string;
-  description: string;
-  evidence: VehicleEvidence;
-  suggested_known_partial_plate?: string | null;
-  expected_outcome: string;
-}
-
-export interface SystemHealth {
-  status: string;
-  service: string;
-  version: string;
-  database_connected: boolean;
-  registry_vehicles_count: number;
+export interface VerifyRequest {
+  job_id: string;
+  track_ids: number[];
+  force_refresh?: boolean;
 }

@@ -1,8 +1,8 @@
 """Stage 2.4 — Blind Multi-Tier VLM Triple-Check & Slot-by-Slot Tie-Breaker.
 
 3-Tier OpenAI-compatible fallback chain:
-  Tier 1 — Groq (qwen/qwen3.8-27b)
-  Tier 2 — NVIDIA Build NIM (nvidia/nemotron-3.5-super-vl-120b-a12b)
+  Tier 1 — NVIDIA Build NIM (nvidia/nemotron-3.5-super-vl-120b-a12b) with multi-key failover
+  Tier 2 — Groq (qwen/qwen3.8-27b)
   Tier 3 — Ollama local (qwen3-vl:4b-instruct / qwen3-vl:2b-instruct)
 
 Visual evidence: 2x2 labeled stitched grids (unenhanced & enhanced) from Stage 2.3 evidence pack.
@@ -30,6 +30,7 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from cv_pipeline.api_keys import get_nvidia_api_keys
 from cv_pipeline.ocr_engine import (
     _SLOT_TYPES_CORRECT,
     _VALID_STATE_CODES,
@@ -143,8 +144,17 @@ def build_evidence_grids(
 
             if not unenh_p.is_file() and not unenh_p.is_absolute():
                 unenh_p = proj_root / unenh_p
+            if not unenh_p.is_file():
+                fallback_u = t_dir / "plate_crops_selected" / "unenhanced" / unenh_p.name
+                if fallback_u.is_file():
+                    unenh_p = fallback_u
+
             if not enh_p.is_file() and not enh_p.is_absolute():
                 enh_p = proj_root / enh_p
+            if not enh_p.is_file():
+                fallback_e = t_dir / "plate_crops_selected" / "enhanced" / enh_p.name
+                if fallback_e.is_file():
+                    enh_p = fallback_e
 
             img_unenh = cv2.imread(str(unenh_p)) if unenh_p.is_file() else None
             img_enh = cv2.imread(str(enh_p)) if enh_p.is_file() else None
@@ -318,7 +328,7 @@ class VLMClient:
         self,
         messages: List[Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], str, float]:
-        """Tier 1: Groq qwen/qwen3.8-27b."""
+        """Tier 2: Groq qwen/qwen3.8-27b."""
         if not self.groq_api_key:
             raise ValueError("GROQ_API_KEY is not set.")
 
@@ -358,12 +368,17 @@ class VLMClient:
     def _call_nvidia(
         self,
         messages: List[Dict[str, Any]],
+        api_key: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], str, float]:
-        """Tier 2: NVIDIA Build NIM nvidia/nemotron-3.5-super-vl-120b-a12b."""
-        if not self.nvidia_api_key:
+        """Tier 1: NVIDIA Build NIM nvidia/nemotron-3.5-super-vl-120b-a12b."""
+        effective_key = api_key or self.nvidia_api_key
+        if not effective_key:
+            keys = get_nvidia_api_keys()
+            effective_key = keys[0][1] if keys else None
+        if not effective_key:
             raise ValueError("NVIDIA_API_KEY is not set.")
 
-        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=self.nvidia_api_key, max_retries=0)
+        client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=effective_key, max_retries=0)
         start_t = time.time()
 
         resp = client.chat.completions.create(
@@ -431,14 +446,14 @@ class VLMClient:
         provider_norm = provider.lower().strip()
         if provider_norm == "auto":
             tiers = [
-                (1, "groq", self._call_groq),
-                (2, "nvidia", self._call_nvidia),
+                (1, "nvidia", self._call_nvidia),
+                (2, "groq", self._call_groq),
                 (3, "ollama", self._call_ollama),
             ]
-        elif provider_norm == "groq":
-            tiers = [(1, "groq", self._call_groq)]
         elif provider_norm == "nvidia":
-            tiers = [(2, "nvidia", self._call_nvidia)]
+            tiers = [(1, "nvidia", self._call_nvidia)]
+        elif provider_norm == "groq":
+            tiers = [(2, "groq", self._call_groq)]
         elif provider_norm == "ollama":
             tiers = [(3, "ollama", self._call_ollama)]
         else:
@@ -456,15 +471,47 @@ class VLMClient:
                     "latency_sec": 0.0,
                 })
                 continue
-            if prov_name == "nvidia" and not self.nvidia_api_key:
-                fallback_trace.append({
-                    "tier": tier_num,
-                    "provider": prov_name,
-                    "model": NVIDIA_MODEL,
-                    "status": "SKIPPED",
-                    "error": "NVIDIA_API_KEY missing",
-                    "latency_sec": 0.0,
-                })
+            if prov_name == "nvidia":
+                nv_keys = get_nvidia_api_keys()
+                if self.nvidia_api_key and not any(k[1] == self.nvidia_api_key for k in nv_keys):
+                    nv_keys.insert(0, ("NVIDIA_API_KEY", self.nvidia_api_key))
+
+                if not nv_keys:
+                    fallback_trace.append({
+                        "tier": tier_num,
+                        "provider": "nvidia",
+                        "model": NVIDIA_MODEL,
+                        "status": "SKIPPED",
+                        "error": "NVIDIA_API_KEY missing",
+                        "latency_sec": 0.0,
+                    })
+                    continue
+
+                for key_label, secret_val in nv_keys:
+                    prov_label = f"nvidia[{key_label}]"
+                    try:
+                        parsed_json, model_used, latency = self._call_nvidia(messages, api_key=secret_val)
+                        fallback_trace.append({
+                            "tier": tier_num,
+                            "provider": prov_label,
+                            "model": model_used,
+                            "status": "SUCCESS",
+                            "error": None,
+                            "latency_sec": round(latency, 3),
+                        })
+                        logger.info(f"VLM call succeeded with {prov_label} ({model_used}) in {latency:.2f}s")
+                        return parsed_json, prov_label, model_used, latency, fallback_trace
+                    except Exception as e:
+                        err_msg = str(e)
+                        fallback_trace.append({
+                            "tier": tier_num,
+                            "provider": prov_label,
+                            "model": getattr(e, "model", NVIDIA_MODEL),
+                            "status": "FAILED",
+                            "error": err_msg,
+                            "latency_sec": 0.0,
+                        })
+                        logger.warning(f"VLM Tier {tier_num} ({prov_label}) failed: {err_msg}")
                 continue
 
             try:
@@ -555,7 +602,9 @@ def compute_ghost_predictions(
         total_score = round(base_score + bonus, 3)
         scored_hypotheses.append({
             "plate": plate_str,
+            "candidate_plate": plate_str,
             "soft_score": total_score,
+            "combined_confidence": total_score,
             "state_code_valid": state_valid,
             "ghost_slot_indices": ghost_indices,
         })
@@ -574,6 +623,18 @@ def compute_ghost_predictions(
                 break
 
     return distinct
+
+
+def _char_matches_slot_type(ch: str, slot_type: Optional[str]) -> bool:
+    """Check if character matches the expected Indian format type (LETTER / DIGIT)."""
+    if not ch or not ch.isalnum():
+        return False
+    st = str(slot_type).upper() if slot_type else ""
+    if st in ("L", "LETTER"):
+        return ch.isalpha()
+    if st in ("D", "DIGIT"):
+        return ch.isdigit()
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -614,10 +675,15 @@ def reconcile_vlm_with_ocr(
             )
             reconciled_slots.append({
                 "slot_idx": s.get("slot", i),
+                "slot_index": s.get("slot", i),
+                "slot_type": s.get("slot_type", "UNKNOWN"),
+                "expected_type": s.get("slot_type", "UNKNOWN"),
                 "ocr_char": c,
                 "ocr_bucket": bucket,
                 "pipe_a_candidate": s.get("pipe_a_top", "?"),
                 "pipe_b_candidate": s.get("pipe_b_top", "?"),
+                "pipe_a_char": s.get("pipe_a_top", "?"),
+                "pipe_b_char": s.get("pipe_b_top", "?"),
                 "vlm_char": None,
                 "vlm_blind_raw_char": None,
                 "vlm_disambiguated_char": None,
@@ -625,6 +691,7 @@ def reconcile_vlm_with_ocr(
                 "vlm_legible": False,
                 "final_char": c,
                 "final_char_soft_score": float(s.get("combined_conf", 0.0)),
+                "final_confidence": float(s.get("combined_conf", 0.0)),
                 "action": "FALLBACK_STAGE_2_3_OCR",
                 "ui_tile_tone": tone,
                 "ghost_stack": [],
@@ -637,6 +704,9 @@ def reconcile_vlm_with_ocr(
         return {
             "schema_version": "2.4.0",
             "track_id": ocr_result.get("track_id", "unknown"),
+            "target_id": ocr_result.get("target_id", ocr_result.get("track_id", "unknown")),
+            "merged_track_ids": ocr_result.get("merged_track_ids", [ocr_result.get("track_id")]),
+            "is_merged_track": bool(ocr_result.get("is_merged_track", False)),
             "vlm_status": "FALLBACK_TO_OCR",
             "provider_used": "none",
             "model_used": "none",
@@ -644,7 +714,9 @@ def reconcile_vlm_with_ocr(
             "fallback_trace": fallback_trace or [],
             "stage_2_3_plate": recovered_ocr,
             "vlm_raw_plate": None,
+            "final_plate": recovered_ocr,
             "reconciled_plate": recovered_ocr,
+            "overall_confidence": float(ocr_result.get("overall_confidence", 0.0)),
             "state_code_valid": validate_state_code(recovered_ocr),
             "plate_layout": "unknown",
             "reconciled_slots": reconciled_slots,
@@ -672,10 +744,12 @@ def reconcile_vlm_with_ocr(
             s = ocr_slots[i]
             ocr_char = str(s.get("char", "?")).upper()
             ocr_bucket = s.get("bucket", "UNREADABLE")
-            pipe_a_cand = str(s.get("pipe_a_top", "?")).upper()
-            pipe_b_cand = str(s.get("pipe_b_top", "?")).upper()
-            pipe_a_conf = float(s.get("pipe_a_conf", 0.0))
-            pipe_b_conf = float(s.get("pipe_b_conf", 0.0))
+            pipe_a_cand = str(s.get("pipe_a_top") or s.get("pipe_a_candidate") or "?").upper()
+            pipe_b_cand = str(s.get("pipe_b_top") or s.get("pipe_b_candidate") or "?").upper()
+            pa_conf_raw = s.get("pipe_a_conf") if s.get("pipe_a_conf") is not None else s.get("pipe_a_confidence", 0.0)
+            pipe_a_conf = float(pa_conf_raw or 0.0)
+            pb_conf_raw = s.get("pipe_b_conf") if s.get("pipe_b_conf") is not None else s.get("pipe_b_confidence", 0.0)
+            pipe_b_conf = float(pb_conf_raw or 0.0)
             slot_type = s.get("slot_type")
         else:
             s = {}
@@ -767,12 +841,27 @@ def reconcile_vlm_with_ocr(
                 final_char = "?"
                 ui_tile_tone = "unknown"
 
-        # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination) ---
+        # --- Rule 3: UNREADABLE Slots (Hard-Block Anti-Hallucination + Unanimous Low-Conf Rescue) ---
         else:  # UNREADABLE
-            # Zero hallucination: any UNREADABLE slot strictly stays '?' regardless of VLM confidence
-            action = "FORBIDDEN_KEEP_UNKNOWN"
-            final_char = "?"
-            ui_tile_tone = "unknown"
+            unanimous_char = vlm_disambiguated_char
+            is_valid_type = _char_matches_slot_type(unanimous_char, slot_type)
+            is_non_empty = bool(
+                pipe_a_cand and pipe_b_cand and unanimous_char
+                and pipe_a_cand != "?" and pipe_b_cand != "?" and unanimous_char != "?"
+            )
+            is_unanimous = is_non_empty and (pipe_a_cand == pipe_b_cand == unanimous_char)
+            is_conf_ok = (pipe_a_conf >= 0.15 and pipe_b_conf >= 0.15 and v_conf >= 0.80)
+
+            if is_unanimous and is_conf_ok and is_valid_type:
+                action = "UNANIMOUS_LOW_CONF_RESCUE"
+                final_char = unanimous_char
+                ui_tile_tone = "black"
+                reasoning_notes.append("unanimous_low_conf_rescue")
+            else:
+                # Zero hallucination: any UNREADABLE slot strictly stays '?'
+                action = "FORBIDDEN_KEEP_UNKNOWN"
+                final_char = "?"
+                ui_tile_tone = "unknown"
 
         actions_summary[action] = actions_summary.get(action, 0) + 1
 
@@ -822,16 +911,18 @@ def reconcile_vlm_with_ocr(
             )
             if ui_tile_tone == "green":
                 final_char_soft_score = max(final_char_soft_score, 0.75)
+            elif action == "UNANIMOUS_LOW_CONF_RESCUE":
+                final_char_soft_score = min(final_char_soft_score, 0.70)
         else:
             final_char_soft_score = 0.0
 
         # Build ghost_stack:
-        # - Drop candidates with soft_score < 0.12
+        # - Drop candidates with soft_score < 0.05
         # - Exclude final_char if tone is green or black
         # - Tag kind: "ghost_fill" if tone == "unknown" else "conflict_alt"
         ghost_entries = []
         for cand in scored_cands:
-            if cand["soft_score"] < 0.12:
+            if cand["soft_score"] < 0.05:
                 continue
             if ui_tile_tone in ("green", "black") and cand["char"] == final_char:
                 continue
@@ -848,10 +939,15 @@ def reconcile_vlm_with_ocr(
 
         slot_data = {
             "slot_idx": i,
+            "slot_index": i,
             "ocr_char": ocr_char,
             "ocr_bucket": ocr_bucket,
+            "slot_type": slot_type,
+            "expected_type": slot_type,
             "pipe_a_candidate": pipe_a_cand,
             "pipe_b_candidate": pipe_b_cand,
+            "pipe_a_char": pipe_a_cand,
+            "pipe_b_char": pipe_b_cand,
             "vlm_char": v_char,
             "vlm_blind_raw_char": vlm_blind_raw_char,
             "vlm_disambiguated_char": vlm_disambiguated_char,
@@ -859,6 +955,7 @@ def reconcile_vlm_with_ocr(
             "vlm_legible": v_legible,
             "final_char": final_char,
             "final_char_soft_score": final_char_soft_score,
+            "final_confidence": final_char_soft_score,
             "action": action,
             "ui_tile_tone": ui_tile_tone,
             "ghost_stack": ghost_stack,
@@ -881,6 +978,9 @@ def reconcile_vlm_with_ocr(
     return {
         "schema_version": "2.4.0",
         "track_id": ocr_result.get("track_id", "unknown"),
+        "target_id": ocr_result.get("target_id", ocr_result.get("track_id", "unknown")),
+        "merged_track_ids": ocr_result.get("merged_track_ids", [ocr_result.get("track_id")]),
+        "is_merged_track": bool(ocr_result.get("is_merged_track", False)),
         "vlm_status": "SUCCESS",
         "provider_used": provider_used or "unknown",
         "model_used": model_used or "unknown",
@@ -888,6 +988,7 @@ def reconcile_vlm_with_ocr(
         "fallback_trace": fallback_trace or [],
         "stage_2_3_plate": recovered_ocr,
         "vlm_raw_plate": vlm_raw_text or None,
+        "final_plate": reconciled_plate,
         "reconciled_plate": reconciled_plate,
         "overall_confidence": adjusted_conf,
         "confidence_penalty_total": round(disputed_count * -0.05, 2),

@@ -101,6 +101,48 @@ def compare_appearances(
         return compare_patch_appearances(feats_a, feats_b)
 
 
+def extract_robust_appearance_features(meta: dict, is_entry: bool) -> Any:
+    """Extract color features from clean interior frames, skipping outermost boundary frames under occlusion."""
+    frame_cnt = meta.get("frame_count", 0)
+    if is_entry:
+        crops = meta.get("head_crops") or ([meta.get("first_crop")] if meta.get("first_crop") is not None else [])
+        if frame_cnt >= 6 and len(crops) >= 4:
+            # Skip outermost 2 boundary frames (potentially occluded by passing vehicle)
+            clean_crops = crops[2:5]
+        else:
+            clean_crops = crops
+    else:
+        tail = meta.get("tail_crops")
+        crops = list(tail) if tail else ([meta.get("last_crop")] if meta.get("last_crop") is not None else [])
+        if frame_cnt >= 6 and len(crops) >= 4:
+            # Skip outermost 2 boundary frames (potentially occluded by passing vehicle)
+            clean_crops = crops[-5:-2] if len(crops) >= 5 else crops[:-2]
+        else:
+            clean_crops = crops
+
+    if not clean_crops:
+        fallback_crop = meta.get("first_crop") if is_entry else meta.get("last_crop")
+        return compute_crop_color_features(fallback_crop)
+
+    computed = [compute_crop_color_features(c) for c in clean_crops if c is not None and getattr(c, "size", 0) > 0]
+    if not computed:
+        fallback_crop = meta.get("first_crop") if is_entry else meta.get("last_crop")
+        return compute_crop_color_features(fallback_crop)
+
+    def _mean_feat(feat_list):
+        valid = [f for f in feat_list if f[0] is not None and f[1] is not None]
+        if not valid:
+            return None, None
+        m_hist = np.mean([f[0] for f in valid], axis=0)
+        cv2.normalize(m_hist, m_hist, 0, 1, cv2.NORM_MINMAX)
+        m_lab = np.mean([f[1] for f in valid], axis=0)
+        return m_hist, m_lab
+
+    full_agg = _mean_feat([c[0] for c in computed])
+    center_agg = _mean_feat([c[1] for c in computed])
+    return full_agg, center_agg
+
+
 class TrackletStitcher:
     """Stitches broken tracklet segments across brief occlusions based on spatiotemporal and appearance cues."""
 
@@ -217,9 +259,11 @@ class TrackletStitcher:
                 traj_a = meta_a.get("trajectory", [])
                 if len(traj_a) >= 5 and dist_px > 45.0:
                     anchor_idx = max(0, len(traj_a) - 6)
+                    end_idx = max(anchor_idx + 1, len(traj_a) - 3) if len(traj_a) >= 6 else -1
                     _, anc_x, anc_y = traj_a[anchor_idx]
-                    vx_a = cx_a - anc_x
-                    vy_a = cy_a - anc_y
+                    _, end_x, end_y = traj_a[end_idx]
+                    vx_a = end_x - anc_x
+                    vy_a = end_y - anc_y
                     v_mag = float(np.sqrt(vx_a ** 2 + vy_a ** 2))
                     if v_mag > 10.0:
                         cos_sim = float((vx_a * dx + vy_a * dy) / (v_mag * dist_px))
@@ -235,8 +279,9 @@ class TrackletStitcher:
                 total_proj_err = dist_px
                 if len(traj_a) >= 3:
                     anchor_idx = max(0, len(traj_a) - 8)
+                    end_idx = max(anchor_idx + 1, len(traj_a) - 3) if len(traj_a) >= 6 else -1
                     f_anc, x_anc, y_anc = traj_a[anchor_idx]
-                    f_last, x_last, y_last = traj_a[-1]
+                    f_last, x_last, y_last = traj_a[end_idx]
                     df = f_last - f_anc
                     if df > 0:
                         vx = (x_last - x_anc) / df
@@ -261,11 +306,9 @@ class TrackletStitcher:
                                 )
                                 continue
 
-                # Condition 4: Visual appearance & colour matching (boundary + best crops, full + central body)
-                crop_end_a = meta_a.get("last_crop")
-                crop_start_b = meta_b.get("first_crop")
-                b_feats_a = compute_crop_color_features(crop_end_a)
-                b_feats_b = compute_crop_color_features(crop_start_b)
+                # Condition 4: Visual appearance & colour matching (occlusion-safe interior + best crops)
+                b_feats_a = extract_robust_appearance_features(meta_a, is_entry=False)
+                b_feats_b = extract_robust_appearance_features(meta_b, is_entry=True)
                 correl_boundary, lab_boundary = compare_appearances(b_feats_a, b_feats_b)
 
                 best_feats_a, _ = track_best_features.get(tid_a, (None, None))

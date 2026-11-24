@@ -785,6 +785,9 @@ def run_dual_plate_detection(
 
     manifest_data = {
         "track_id": int(track_id),
+        "target_id": int(track_id),
+        "merged_track_ids": crop_manifest.get("merged_track_ids", [int(track_id)]),
+        "is_merged_track": crop_manifest.get("is_merged_track", False),
         "class_name": class_name,
         "category": category,
         "median_plate_aspect_ratio": round(median_ar, 2),

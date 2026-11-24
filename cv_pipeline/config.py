@@ -33,7 +33,7 @@ DEFAULT_SUMMARY_PATH = "outputs/tracks_summary.json"
 DEFAULT_HISTORY_PATH = "outputs/track_history.json"
 
 # Pipeline defaults tuned for CCTV vehicle tracking
-DEFAULT_IMGSZ = 1280             # Full-resolution inference (1280px) for sharp distant/moving two-wheelers
+DEFAULT_IMGSZ = 960              # Optimal inference resolution (960px) for fast high-accuracy vehicle tracking
 DEFAULT_CONF_THRESHOLD = 0.20    # Low detector threshold to retain motion-blurred vehicles
 DEFAULT_IOU_THRESHOLD = 0.70
 
@@ -43,7 +43,7 @@ DEFAULT_MIN_BOX_AREA = 1200      # Minimum bounding-box area in pixels for kept 
 DEFAULT_MIN_BOX_DIM = 28         # Minimum bounding-box width/height in pixels
 
 # Tracklet stitching defaults for reconnecting occluded vehicle tracks
-DEFAULT_MAX_STITCH_GAP_SEC = 2.5       # Max occlusion gap to stitch (seconds)
+DEFAULT_MAX_STITCH_GAP_SEC = 3.0       # Max occlusion gap to stitch (seconds) up to 3.0s for slow/stopped vehicles
 DEFAULT_MAX_STITCH_SPEED_PX_S = 450.0   # Max plausible vehicle velocity across CCTV (pixels/sec)
 DEFAULT_MIN_HIST_CORREL = 0.65         # Min HSV color histogram correlation
 DEFAULT_MAX_LAB_DIST = 35.0            # Max Lab color space Euclidean distance (allows lighting variation while rejecting different vehicles)

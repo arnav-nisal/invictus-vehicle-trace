@@ -271,7 +271,12 @@ def test_cascade_simulation():
         # Return client_tier1 on first call, client_tier2 on second call
         mock_openai_cls.side_effect = [client_tier1, client_tier2]
 
-        with patch.dict(os.environ, {"NVIDIA_API_KEY": "fake_nv", "OPENROUTER_API_KEY": "fake_or"}):
+        with patch.dict(os.environ, {
+            "NVIDIA_API_KEY": "fake_nv",
+            "NVIDIA_API_KEY_1": "",
+            "NVIDIA_API_KEY_2": "",
+            "OPENROUTER_API_KEY": "fake_or",
+        }):
             res, meta = extract_vehicle_attributes_with_meta(images=[dummy_img])
             # Verify Tier 1 client initialization arguments (timeout=25.0, max_retries=0)
             mock_openai_cls.assert_any_call(
@@ -331,7 +336,12 @@ def test_cascade_simulation():
 
         mock_openai_cls.side_effect = [client_t1, client_t2, client_t3]
 
-        with patch.dict(os.environ, {"NVIDIA_API_KEY": "fake_nv", "OPENROUTER_API_KEY": "fake_or"}):
+        with patch.dict(os.environ, {
+            "NVIDIA_API_KEY": "fake_nv",
+            "NVIDIA_API_KEY_1": "",
+            "NVIDIA_API_KEY_2": "",
+            "OPENROUTER_API_KEY": "fake_or",
+        }):
             res, meta = extract_vehicle_attributes_with_meta(images=[dummy_img])
             # Verify Tier 3 call extra_body and timeout
             t3_call_kwargs = client_t3.chat.completions.create.call_args.kwargs
@@ -355,7 +365,12 @@ def test_cascade_simulation():
         client_f3.chat.completions.create.side_effect = Exception("OpenRouter Nemotron 429 Quota Exceeded")
         mock_openai_cls.side_effect = [client_f1, client_f2, client_f3]
 
-        with patch.dict(os.environ, {"NVIDIA_API_KEY": "fake_nv", "OPENROUTER_API_KEY": "fake_or"}):
+        with patch.dict(os.environ, {
+            "NVIDIA_API_KEY": "fake_nv",
+            "NVIDIA_API_KEY_1": "",
+            "NVIDIA_API_KEY_2": "",
+            "OPENROUTER_API_KEY": "fake_or",
+        }):
             full_res = extract_vehicle_attributes_with_meta(
                 images=[dummy_img],
                 coarse_class="auto-rickshaw",
@@ -393,7 +408,13 @@ def test_api_endpoint_integration():
          patch("backend.opensource_extractor._prepare_images") as mock_prep:
         mock_openai_cls.side_effect = Exception("Simulated Total Network Outage")
         mock_prep.return_value = (["fake_b64"], None)
-        with patch.dict(os.environ, {"EXTRACTOR_PROVIDER": "opensource", "NVIDIA_API_KEY": "fake_nv", "OPENROUTER_API_KEY": "fake_or"}):
+        with patch.dict(os.environ, {
+            "EXTRACTOR_PROVIDER": "opensource",
+            "NVIDIA_API_KEY": "fake_nv",
+            "NVIDIA_API_KEY_1": "",
+            "NVIDIA_API_KEY_2": "",
+            "OPENROUTER_API_KEY": "fake_or",
+        }):
             resp = client.post("/api/vehicles/analyze", json={"scenario_id": "scenario-1"})
             assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
             data = resp.json()

@@ -66,7 +66,7 @@ def dummy_track_env(tmp_path: Path):
             {"slot": 6, "slot_type": "D", "char": "5", "bucket": "LOCKED", "pipe_a_top": "5", "pipe_a_conf": 0.88, "pipe_b_top": "5", "pipe_b_conf": 0.87},
             {"slot": 7, "slot_type": "D", "char": "5", "bucket": "LOCKED", "pipe_a_top": "5", "pipe_a_conf": 0.86, "pipe_b_top": "5", "pipe_b_conf": 0.89},
             {"slot": 8, "slot_type": "D", "char": "8", "bucket": "CONTRADICTORY", "pipe_a_top": "8", "pipe_a_conf": 0.48, "pipe_b_top": "0", "pipe_b_conf": 0.45},
-            {"slot": 9, "slot_type": "D", "char": "?", "bucket": "UNREADABLE", "pipe_a_top": "?", "pipe_a_conf": 0.15, "pipe_b_top": "?", "pipe_b_conf": 0.10},
+            {"slot": 9, "slot_type": "D", "char": "?", "bucket": "UNREADABLE", "pipe_a_top": "?", "pipe_a_conf": 0.15, "pipe_b_top": "2", "pipe_b_conf": 0.24},
         ],
         "vlm_evidence_pack": evidence_pack,
     }
@@ -254,12 +254,97 @@ def test_reconciliation_unreadable_anti_hallucination(dummy_track_env):
     assert slots_h[9]["vlm_blind_raw_char"] == "0"
 
 
+def test_unanimous_low_conf_rescue(dummy_track_env):
+    """UNREADABLE slot with Pipe A = M (0.17), Pipe B = M (0.21), VLM = M (0.95) rescues to M."""
+    _, _, base_ocr = dummy_track_env
+    mock_ocr = json.loads(json.dumps(base_ocr))
+    # Slot 0 is LETTER slot type: set to UNREADABLE with both pipes agreeing on M at low conf
+    mock_ocr["slots"][0] = {
+        "slot": 0,
+        "slot_type": "L",
+        "char": "?",
+        "bucket": "UNREADABLE",
+        "pipe_a_top": "M",
+        "pipe_a_conf": 0.17,
+        "pipe_b_top": "M",
+        "pipe_b_conf": 0.21,
+    }
+
+    vlm_output = {
+        "slot_reads": [
+            {"slot_idx": 0, "char": "M", "confidence": 0.95, "legible": True, "note": "unanimous M"},
+        ]
+    }
+    res = reconcile_vlm_with_ocr(mock_ocr, vlm_output)
+    slots = {s["slot_idx"]: s for s in res["reconciled_slots"]}
+    s0 = slots[0]
+
+    assert s0["final_char"] == "M"
+    assert s0["action"] == "UNANIMOUS_LOW_CONF_RESCUE"
+    assert s0["ui_tile_tone"] == "black"
+    assert "unanimous_low_conf_rescue" in s0["reasoning_notes"]
+    assert s0["final_confidence"] <= 0.70
+    assert s0["final_char_soft_score"] <= 0.70
+    # Resolved char excluded from ghost_stack
+    assert all(c["char"] != "M" for c in s0["ghost_stack"])
+
+
+def test_unreadable_disagreements_stay_unknown(dummy_track_env):
+    """UNREADABLE slot where engines disagree stays strictly '?' (FORBIDDEN_KEEP_UNKNOWN)."""
+    _, _, base_ocr = dummy_track_env
+    mock_ocr = json.loads(json.dumps(base_ocr))
+
+    # Case 1: Pipe A = O (0.28), Pipe B = O (0.22), VLM = D (0.90) on letter slot
+    mock_ocr["slots"][0] = {
+        "slot": 0,
+        "slot_type": "L",
+        "char": "?",
+        "bucket": "UNREADABLE",
+        "pipe_a_top": "O",
+        "pipe_a_conf": 0.28,
+        "pipe_b_top": "O",
+        "pipe_b_conf": 0.22,
+    }
+    vlm_1 = {
+        "slot_reads": [
+            {"slot_idx": 0, "char": "D", "confidence": 0.90, "legible": True, "note": "looks like D"},
+        ]
+    }
+    res_1 = reconcile_vlm_with_ocr(mock_ocr, vlm_1)
+    s0_1 = {s["slot_idx"]: s for s in res_1["reconciled_slots"]}[0]
+    assert s0_1["final_char"] == "?"
+    assert s0_1["action"] == "FORBIDDEN_KEEP_UNKNOWN"
+    assert s0_1["ui_tile_tone"] == "unknown"
+
+    # Case 2: Pipe A = K (0.23), Pipe B = M (0.27), VLM = M (0.95) on letter slot
+    mock_ocr["slots"][0] = {
+        "slot": 0,
+        "slot_type": "L",
+        "char": "?",
+        "bucket": "UNREADABLE",
+        "pipe_a_top": "K",
+        "pipe_a_conf": 0.23,
+        "pipe_b_top": "M",
+        "pipe_b_conf": 0.27,
+    }
+    vlm_2 = {
+        "slot_reads": [
+            {"slot_idx": 0, "char": "M", "confidence": 0.95, "legible": True, "note": "VLM says M"},
+        ]
+    }
+    res_2 = reconcile_vlm_with_ocr(mock_ocr, vlm_2)
+    s0_2 = {s["slot_idx"]: s for s in res_2["reconciled_slots"]}[0]
+    assert s0_2["final_char"] == "?"
+    assert s0_2["action"] == "FORBIDDEN_KEEP_UNKNOWN"
+    assert s0_2["ui_tile_tone"] == "unknown"
+
+
 def test_ghost_stack_tagging_and_tone(dummy_track_env):
     """Test ghost_stack deduplication, soft_score filtering, and conflict_alt vs ghost_fill tagging."""
     _, _, mock_ocr = dummy_track_env
 
     # Slot 4 (CONTRADICTORY: A="B", B="8", A_runner="D")
-    # Slot 9 (UNREADABLE: A="?", B="?")
+    # Slot 9 (UNREADABLE: A="?", B="2" @ 0.24 -> soft_score ~0.06)
     vlm_output = {
         "plate_text": "UP15BE5584",
         "slot_reads": [
@@ -269,6 +354,10 @@ def test_ghost_stack_tagging_and_tone(dummy_track_env):
     }
 
     res = reconcile_vlm_with_ocr(mock_ocr, vlm_output)
+    assert "final_plate" in res, "Top-level final_plate key must be present"
+    assert res["final_plate"] == res["reconciled_plate"], "final_plate must match reconciled_plate"
+    assert res["final_plate"] is not None
+
     slots = {s["slot_idx"]: s for s in res["reconciled_slots"]}
 
     # Slot 4: final_char is "B" (tone="black"). ghost_stack must EXCLUDE "B" and tag runners as "conflict_alt"
@@ -279,15 +368,20 @@ def test_ghost_stack_tagging_and_tone(dummy_track_env):
     assert "B" not in g4_chars, "Winning final_char must be excluded from ghost_stack on black tile"
     for g in s4["ghost_stack"]:
         assert g["kind"] == "conflict_alt"
-        assert g["soft_score"] >= 0.12
+        assert g["soft_score"] >= 0.05
 
-    # Slot 9: final_char is "?" (tone="unknown"). ghost_stack must contain "4" tagged as "ghost_fill"
+    # Slot 9: final_char is "?" (tone="unknown"). ghost_stack must contain "4" and low-conf "2" tagged as "ghost_fill"
     s9 = slots[9]
     assert s9["final_char"] == "?"
     assert s9["ui_tile_tone"] == "unknown"
     assert len(s9["ghost_stack"]) > 0
-    assert s9["ghost_stack"][0]["char"] == "4"
-    assert s9["ghost_stack"][0]["kind"] == "ghost_fill"
+    g9_chars = [g["char"] for g in s9["ghost_stack"]]
+    assert "4" in g9_chars
+    assert "2" in g9_chars, "Low-score (~0.06) single-pipeline OCR candidate must survive floor"
+    cand_2 = next(g for g in s9["ghost_stack"] if g["char"] == "2")
+    assert 0.05 <= cand_2["soft_score"] < 0.10
+    assert cand_2["kind"] == "ghost_fill"
+    assert cand_2["sources"] == ["pipe_b"]
 
 
 def test_beam_search_ghost_predictions():

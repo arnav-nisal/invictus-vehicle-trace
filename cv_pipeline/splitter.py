@@ -71,11 +71,30 @@ def split_tracks_on_sudden_jumps(
             curr_type = get_vehicle_type(curr_det.get("label", ""))
 
             # Condition 1: Class switch between two-wheeler and larger vehicle (car/truck/bus)
-            class_switch = (
-                (prev_type != curr_type)
-                and (prev_type in ("two-wheeler", "larger-vehicle"))
-                and (curr_type in ("two-wheeler", "larger-vehicle"))
-            )
+            # Must switch away from the current segment's established type and persist for >= 3 consecutive detections
+            class_switch = False
+            if (
+                prev_type != curr_type
+                and prev_type in ("two-wheeler", "larger-vehicle")
+                and curr_type in ("two-wheeler", "larger-vehicle")
+            ):
+                seg_types = [
+                    get_vehicle_type(obs[1].get("label", ""))
+                    for obs in current_segment
+                    if get_vehicle_type(obs[1].get("label", "")) in ("two-wheeler", "larger-vehicle")
+                ]
+                established_type = Counter(seg_types).most_common(1)[0][0] if seg_types else prev_type
+
+                if curr_type != established_type:
+                    if i + 2 < len(obs_list):
+                        subsequent_types = [
+                            get_vehicle_type(obs_list[k][1].get("label", ""))
+                            for k in range(i, i + 3)
+                        ]
+                        if all(t == curr_type for t in subsequent_types):
+                            class_switch = True
+                    else:
+                        class_switch = False
 
             # Condition 2: Bounding-box size abruptly jumps or shrinks
             prev_area = max(1.0, float(prev_det.get("area", 1.0)))
@@ -140,13 +159,12 @@ def split_tracks_on_sudden_jumps(
         logger.info("No abrupt class or size jumps detected; all tracks consistent.")
         return tracks_meta, frame_observations, []
 
-    # Open video capture once to populate best crop candidates for split segments if needed
-    cap = cv2.VideoCapture(str(video_path))
-    cap_opened = cap.isOpened()
-
     updated_meta = dict(tracks_meta)
 
     for orig_tid, seg_list in tracks_to_split.items():
+        orig_meta = tracks_meta.get(orig_tid, {})
+        orig_best = crop_selector.get_best(orig_tid) if crop_selector else None
+
         # First segment retains the original ID
         # Subsequent segments receive a new unique ID
         for s_idx, seg in enumerate(seg_list):
@@ -189,48 +207,15 @@ def split_tracks_on_sudden_jumps(
                 for f, d in seg
             ]
 
-            # Find the best frame with highest confidence / area for crop extraction
-            best_f, best_det = max(seg, key=lambda x: (x[1].get("conf", 0.0), x[1].get("area", 0.0)))
-            first_crop = None
-            last_crop = None
+            # In-memory crop preservation (zero video seeking / zero disk I/O)
+            first_crop = orig_meta.get("first_crop")
+            last_crop = orig_meta.get("last_crop")
+            head_crops = list(orig_meta.get("head_crops", []))
+            tail_crops = list(orig_meta.get("tail_crops", []))
 
-            if cap_opened:
-                # Extract first crop
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
-                ret, f_img = cap.read()
-                if ret and f_img is not None:
-                    x1, y1, x2, y2 = [int(round(c)) for c in first_bbox]
-                    x1 = max(0, min(f_img.shape[1] - 1, x1))
-                    y1 = max(0, min(f_img.shape[0] - 1, y1))
-                    x2 = max(0, min(f_img.shape[1], x2))
-                    y2 = max(0, min(f_img.shape[0], y2))
-                    if x2 > x1 and y2 > y1:
-                        first_crop = f_img[y1:y2, x1:x2].copy()
-
-                # Extract last crop
-                cap.set(cv2.CAP_PROP_POS_FRAMES, end_f)
-                ret, f_img = cap.read()
-                if ret and f_img is not None:
-                    x1, y1, x2, y2 = [int(round(c)) for c in last_bbox]
-                    x1 = max(0, min(f_img.shape[1] - 1, x1))
-                    y1 = max(0, min(f_img.shape[0] - 1, y1))
-                    x2 = max(0, min(f_img.shape[1], x2))
-                    y2 = max(0, min(f_img.shape[0], y2))
-                    if x2 > x1 and y2 > y1:
-                        last_crop = f_img[y1:y2, x1:x2].copy()
-
-                # Extract best crop candidate for crop_selector
-                cap.set(cv2.CAP_PROP_POS_FRAMES, best_f)
-                ret, f_img = cap.read()
-                if ret and f_img is not None:
-                    crop_selector.update(
-                        track_id=int(seg_tid),
-                        frame=f_img,
-                        bbox=best_det["bbox"],
-                        confidence=float(best_det["conf"]),
-                        frame_idx=best_f,
-                        timestamp_sec=best_f / fps,
-                    )
+            # Propagate best crop candidate into crop_selector for new segment ID
+            if crop_selector and orig_best is not None and seg_tid != orig_tid:
+                crop_selector._best_candidates[seg_tid] = orig_best
 
             seg_meta = {
                 "id": int(seg_tid),
@@ -249,13 +234,12 @@ def split_tracks_on_sudden_jumps(
                 "last_bbox": last_bbox,
                 "first_crop": first_crop,
                 "last_crop": last_crop,
+                "head_crops": head_crops,
+                "tail_crops": tail_crops,
                 "trajectory": trajectory,
                 "original_ids": [int(seg_tid)],
             }
             updated_meta[seg_tid] = seg_meta
-
-    if cap_opened:
-        cap.release()
 
     logger.info(
         f"Track splitting complete: {len(split_audit)} split event(s) executed across {len(tracks_to_split)} tracks."

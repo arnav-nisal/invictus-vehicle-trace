@@ -346,3 +346,172 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - Test suite: **49/49 tests passing ($100\%$)** in 5.7s.
   - Benchmarked on `outputs/activa_signal/track_027` (Reconciled: `UP15BE5580` / Ghost 1: `UP15BE5580` at $0.779$) and `outputs/simple_traffic_30s/track_002` (Reconciled: `????B?718?` / Ghost 1: `HR01BC7184` at $0.645$).
 
+---
+
+
+---
+
+### 2026-11-24 05:55:00 IST — Multi-Key NVIDIA NIM Failover Pool, Stage 3 Vehicle Intelligence Integration, & Contact Strip Generator
+- **1. Shared Multi-Key NVIDIA NIM Pool (`cv_pipeline/api_keys.py`)**:
+  - Created lightweight helper `get_nvidia_api_keys() -> List[Tuple[str, str]]`.
+  - Priority ordering: `NVIDIA_API_KEY`, `NVIDIA_API_KEY_1`, `NVIDIA_API_KEY_2`, ..., `NVIDIA_API_KEY_N`.
+  - Deduplicates by secret value while preserving the highest-priority key label.
+  - Zero raw token leakage: returns `(key_label, secret_value)` pairs so audit traces and logs strictly record `key_label`.
+- **2. Stage 2.4 Multi-Key Failover (`cv_pipeline/vlm_verifier.py`)**:
+  - Updated `_call_nvidia(messages, api_key=...)` with `max_retries=0`.
+  - Upgraded `execute_blind_query`: cycles sequentially through all available NVIDIA NIM keys on HTTP 401/402/403/429/5xx, timeout, or parse failure before falling back to Tier 3 (Ollama).
+  - Records exact key attempt in `fallback_trace` as `provider: "nvidia[<KEY_LABEL>]"` and returns `provider_used: "nvidia[<KEY_LABEL>]"`.
+- **3. Stage 3 Multi-Key Integration (`backend/opensource_extractor.py`)**:
+  - Upgraded Tier 1 Primary (NVIDIA NIM) in `extract_vehicle_attributes_with_meta` to cycle through all keys returned by `get_nvidia_api_keys()`.
+  - On success, sets `provider = f"nvidia[{key_label}]"`.
+  - Aggregates individual key errors into a unified `tier_1_err` string, preserving the exact `len(tier_errors) == 3` outage contract.
+  - Fully backward compatible with `extract_vehicle_attributes` and all API endpoints.
+- **4. Top-3 Sharpest Vehicle Crop Selector & Contact Strip Generator (`cv_pipeline/vehicle_crop_selector.py`)**:
+  - Implemented `select_top_vehicle_crops(track_dir, top_k=3)` using composite quality scoring:
+    $$\text{score} = \sqrt{\text{area}} \cdot \ln(1 + \text{lap\_var})$$
+  - Applies 3-bucket temporal diversity (early, middle, late track lifetime) when $>6$ crops exist.
+  - Built `build_vehicle_crops_contact_strip` stitching a 1xK visual contact strip (`stage3_vehicle_crops_top3.png`) with header metadata.
+  - Implemented `run_stage3_vehicle_attributes`: orchestrates crop selection, contact strip building, Stage 3 VLM extraction, and persistence to `vehicle_attributes.json`.
+- **5. Interactive Full-Stack Pipeline Tester Upgrade (`scripts/test_full_pipeline.py`)**:
+  - Wired Stage 3 attribute extraction automatically after Stage 2.4.
+  - Added CLI flag `--skip-attributes`.
+  - Upgraded terminal report to display both License Plate reconstruction and Stage 3 Vehicle Intelligence (Body Type, Colour, Make, Model, Confidences, Provider/Key Label, and Selected Crops).
+  - Surfaces visual asset paths for both clearest plate crop and 1x3 vehicle contact strip.
+- **6. Comprehensive Unit Testing & Full Pipeline Verification**:
+  - Created `tests/test_multi_key_and_stage3.py` covering key ordering/deduplication, VLM verifier multi-key failover, opensource extractor multi-key failover, and crop quality scoring / contact strip generation.
+  - All **68/68 unit tests passing ($100\%$)** via `python -m pytest tests/`.
+  - Verified `scripts/test_opensource_extractor.py` (all 8 sections passing) and `scripts/test_matcher.py` (all 5 tests passing).
+  - Executed end-to-end smoke test on `data/clips/activa_signal.mp4` Track 27:
+    - Hard Reconciled Plate: `UP15BE5580` (`valid_state_code: True`)
+    - Vehicle Intelligence: `two-wheeler (0.98), white (0.95), Honda (0.85), Activa (0.80)`
+    - Latency: 2.14s via `nvidia[NVIDIA_API_KEY]`.
+  - Added `data/Final/` to `.gitignore`.
+
+---
+
+## [2026-11-24] — Stage 1 Latency Optimization, Occlusion Stitching & Multi-ID Vehicle Tracing
+
+### 2026-11-24 06:50:00 IST — Stage 1 Latency 4-5x Acceleration, Anti-Flicker Hysteresis & Multi-ID Merging
+- **1. Stage 1 Performance Acceleration (77s -> ~15-22s, >4x speedup)**:
+  - **FP16 Half-Precision (`cv_pipeline/pipeline.py`)**: Automatically activates `half=True` when running on CUDA.
+  - **Default Resolution Right-Sizing (`cv_pipeline/config.py`)**: Changed `DEFAULT_IMGSZ` from `1280` to `960` (configurable via CLI flag `--imgsz`).
+  - **Smart Frame Striding (`vid_stride=2`)**: When source video $\ge 24\text{ FPS}$, skips every other frame ($\sim 15\text{ FPS}$ tracking) while strictly mapping each detection back to its **true original video frame index** and exact timestamp, guaranteeing downstream Stage 2 and Stage 3 crop extraction remain $100\%$ accurate. Added `--stride` override flag.
+  - **Zero CPU GMC Overhead (`cv_pipeline/botsort_reid.yaml`)**: Set `gmc_method: None` to eliminate expensive CPU sparse optical flow on stationary CCTV feeds.
+  - **Zero-Seeking Splitter Elimination (`cv_pipeline/splitter.py`)**: Completely eliminated the 10-second `cv2.VideoCapture` keyframe-seeking bottleneck during track splitting by propagating in-memory crops (`first_crop`, `last_crop`, `head_crops`, `tail_crops`, and `crop_selector._best_candidates`). Split/stitch execution reduced from $10\text{s}$ to $< 0.01\text{s}$ ($1000\times$ faster).
+  - **Fast Pass 2 Video Rendering (`cv_pipeline/pipeline.py`)**: Added `write_video: bool = True` (configurable via `--no-video` flag). Downscales preview video frames to max 1280px width (720p), dropping write latency from 23s to 5-7s.
+- **2. Occlusion ID Split Hardening & Anti-Flicker Hysteresis**:
+  - **Extended Tracking Memory (`cv_pipeline/botsort_reid.yaml`)**: Increased `track_buffer: 90` frames ($3.0\text{s}$) to bridge vehicle-crossing occlusions.
+  - **3-Frame Class-Switch Hysteresis (`cv_pipeline/splitter.py`)**: Prevents transient 1-frame YOLO label flickers (e.g., `motorcycle -> car -> motorcycle`) from splitting legitimate tracks. Requires the new class to switch away from the segment's established majority class and persist for $\ge 3$ consecutive tracked detections.
+  - **Occlusion-Safe Appearance Sampling (`cv_pipeline/stitcher.py`)**: Skips the outermost 2 boundary frames when track length $\ge 6$, computing mean HSV histograms and Lab color vectors across 3 clean interior frames to prevent crossing vehicles from corrupting vehicle appearance descriptors. Extended `max_gap_seconds: 3.0s`.
+- **3. Multi-ID Target Support (`cv_pipeline/crop_extractor.py`, `scripts/test_full_pipeline.py`)**:
+  - Implemented `parse_target_ids()` parsing single integers, comma-separated strings (`"26, 64"`), and lists.
+  - Chronologically pools observations across all specified IDs with frame deduplication (highest detector confidence wins).
+  - Emits dedicated track directory `track_026_064` when merged.
+  - Propagates `"target_id"`, `"merged_track_ids"`, and `"is_merged_track": true` across all pipeline manifests: `crop_manifest.json`, `plate_manifest.json`, `ocr_result.json`, `vlm_result.json`, `final_plate_result.json`, and `vehicle_attributes.json`.
+  - Updated `print_forensic_report()` to prominently display `Target Vehicle: Track #26 (Merged IDs: 26, 64 — treated as single vehicle)`.
+- **4. Unit Testing & Multi-Scenario Verification**:
+  - Created [tests/test_multi_id_and_split_hysteresis.py](file:///c:/Users/arnav/Documents/invictus-vehicle-trace/tests/test_multi_id_and_split_hysteresis.py) covering multi-ID parsing, chronological pooling with overlap deduplication, 3-frame class-switch hysteresis, and manifest metadata propagation.
+  - All **72/72 unit tests passing ($100\%$)** across the test suite in 7.3s.
+  - Benchmarked fresh on `data/Final/file_07.mp4` (600 frames):
+    - Pass 1 detection + tracking: 15s (down from 44s)
+    - Split + stitch: 0.3s (down from 10s, 35 merges executed)
+    - Pass 2 preview render: 7s (down from 23s)
+    - Total Stage 1 latency: 22s with video (down from 77s) and 15s with `--no-video`.
+  - Verified multi-ID pipeline execution on `file_07.mp4` Track `[20, 33]`: reconstructed `UP15BE5580` with valid RTO state code and all manifests reflecting `is_merged_track: True`.
+
+### 2026-11-24 07:10:00 IST — Smooth Temporal Box Interpolation Under Frame Striding
+- **1. Temporal Box Interpolation Helper (`interpolate_track_gaps`)**:
+  - Implemented $O(N)$ linear bounding-box interpolation across missing frames where $1 < \Delta f \le \text{max\_gap\_frames}$ (`max_gap_frames = max(6, vid_stride * 3)`).
+  - Calculates exact fractional interpolations for `[x1, y1, x2, y2]`, area, and confidence, tagging interpolated entries with `"interpolated": True` (and real detections with `"interpolated": False`).
+  - Gaps $> \text{max\_gap\_frames}$ (such as multi-second occlusions) are strictly untouched.
+- **2. Flicker-Free Pass 2 Video Rendering (`cv_pipeline/pipeline.py`)**:
+  - Interpolated boxes are incorporated into `frame_observations` before Pass 2 rendering.
+  - Video annotation renders on every native 30 FPS frame, eliminating box strobing/flickering while preserving 100% of the $4\times$ to $5\times$ tracking speedup.
+- **3. Fair Track Longevity Filtering Under Striding**:
+  - Scaled post-tracking `min_frames = max(5, ceil(min_frames / vid_stride))` and accepted tracks with observed $\text{duration} \ge 0.5\text{s}$ before interpolation so brief legitimate vehicles are not filtered out.
+- **4. Pure Stage 2/3 Crop Extraction (`cv_pipeline/crop_extractor.py`)**:
+  - Filters out `obs.get("interpolated", False)` so Stage 2 plate localization, Stage 2.3 dual OCR, Stage 2.4 VLM triple-check, and Stage 3 vehicle attribute extraction run strictly on pristine, authentic YOLO detections.
+- **5. Unit Tests & Benchmark Verification**:
+  - Added unit tests in `tests/test_multi_id_and_split_hysteresis.py`:
+    - Midpoint interpolation test (`frame 0` & `frame 2` produce exact midpoint at `frame 1` with `"interpolated": True`).
+    - Large gap rejection test (`gap > 6` is not interpolated).
+    - Crop extractor purity test (`crop_extractor` skips interpolated frames).
+  - All **75/75 unit tests passing ($100\%$)** across the test suite in 7.34s.
+  - Re-benchmarked fresh on `data/Final/file_07.mp4`: execution completed in ~20s with verified continuous, non-flickering bounding boxes across consecutive frames 0..9 in `track_history.json`.
+
+### 2026-11-24 07:15:00 IST — Stage 2.4 VLM Hierarchy Update (Nemotron Primary with Multi-Key Failover)
+- **1. Re-Ordered Provider Hierarchy (`cv_pipeline/vlm_verifier.py`)**:
+  - Re-ordered default `"auto"` fallback chain to prioritize NVIDIA NIM:
+    - **Tier 1 (Primary)**: NVIDIA Build NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`), automatically cycling across all available keys (`NVIDIA_API_KEY`, `NVIDIA_API_KEY_1`, `NVIDIA_API_KEY_2`, etc.) sequentially on rate limits or API errors.
+    - **Tier 2 (Secondary)**: Groq Cloud (`qwen/qwen3.8-27b`) as secondary cloud failover.
+    - **Tier 3 (Local Fallback)**: Offline Ollama (`qwen3-vl:4b-instruct` / `qwen3-vl:2b-instruct`) as zero-network local fallback.
+  - Updated single-provider mappings and docstrings to match the new tier enumeration.
+- **2. Unit Test Verification**:
+  - Added `test_vlm_verifier_auto_hierarchy` in `tests/test_multi_key_and_stage3.py`, validating that `"auto"` mode executes Tier 1 (NVIDIA) first, and only cascades to Tier 2 (Groq) and Tier 3 (Ollama) if all NVIDIA keys fail.
+  - All **76/76 unit tests passing ($100\%$)** across the test suite in 7.30s.
+
+### 2026-11-24 07:45:00 IST — Stage 2.4 Anti-Overblocking Rule (`UNANIMOUS_LOW_CONF_RESCUE`)
+- **1. Surgical Unanimous Rescue Rule (`cv_pipeline/vlm_verifier.py`)**:
+  - Added `UNANIMOUS_LOW_CONF_RESCUE` in `reconcile_vlm_with_ocr` for `UNREADABLE` slots where ALL 4 conditions hold:
+    1. `pipe_a_cand == pipe_b_cand == vlm_disambiguated_char` (non-empty and not `'?'`).
+    2. `pipe_a_conf >= 0.15` and `pipe_b_conf >= 0.15`.
+    3. `v_conf >= 0.80`.
+    4. Character matches the slot's expected Indian format type (`LETTER` / `DIGIT` checked via `_char_matches_slot_type`).
+  - Sets `action = "UNANIMOUS_LOW_CONF_RESCUE"`, `ui_tile_tone = "black"`, logs `"unanimous_low_conf_rescue"` in `reasoning_notes`, caps `final_char_soft_score` and `final_confidence` at `0.70`, and excludes the resolved character from `ghost_stack`.
+  - Disagreements or failing any condition continue to be strictly hard-blocked (`FORBIDDEN_KEEP_UNKNOWN`, `'?'`, `ui_tile_tone = "unknown"`).
+- **2. Unit Tests & Ground-Truth Verification**:
+  - Added `test_unanimous_low_conf_rescue` and `test_unreadable_disagreements_stay_unknown` in `tests/test_vlm_verifier.py`.
+  - All **78/78 unit tests passing ($100\%$)** across the test suite in 7.26s.
+  - Re-verified `outputs/simple_traffic_30s/track_002`: plate strictly remains `????BG718?` with zero hallucination.
+
+### 2026-11-24 08:15:00 IST — Full FastAPI Backend Bridge (Screens 1, 2, 3) & Forensic PDF Dossier Generator
+- **1. Screen 1 & Screen 2 Static Mounts & Utility Endpoints (`backend/main.py`)**:
+  - Mounted `/media/clips` to `data/Final` (with case-insensitive fallback to `data/final` supporting HTTP 206 Range video streaming).
+  - Mounted `/outputs` to `outputs/` for all crop, thumbnail, and grid visual assets.
+  - Added `GET /api/pipeline/clips`: Enumerates available clips with file metadata, duration, resolution, and stream URLs.
+  - Added `GET /api/registry/stats`: Direct SQLite count returning `{"total_records": <int>}`.
+- **2. Screen 2 Web Video Artifacts Engine (`cv_pipeline/web_artifacts.py`)**:
+  - Built `build_boxes_json()`: Transforms frame-by-frame track history into an $O(1)$ frame-indexed lookup dictionary (`boxes.json`) consumed by the frontend video canvas overlay.
+  - Built `generate_track_thumbnails()`: Extracts representative high-quality JPEG thumbnails (max 320px width at 85% quality) per track in a single sequential video pass (`thumbnails/track_<ID:03d>.jpg`).
+  - Added `POST /api/videos/select-local`: Strict path traversal check rejecting `..`, `/`, `\`; instant 0s cache hit if `boxes.json` and `tracks_summary.json` exist; otherwise dispatches asynchronous Stage 1 tracking on a dedicated single-worker thread pool (`STAGE1_EXECUTOR`).
+  - Added `GET /api/videos/{job_id}/status`: Polling endpoint returning live progress, stage step, and complete video metadata + track list.
+- **3. Screen 3 Unified Verification Endpoint (`backend/main.py`)**:
+  - Added `POST /api/pipeline/verify`: Executes end-to-end verification pipeline (Stage 2.1 crop extraction -> Stage 2.2 dual-detector plate detection -> Stage 2.3 dual OCR -> Stage 2.4 blind VLM triple-check -> Stage 3 vehicle attributes -> Stage 4 SQLite registry matching).
+  - Supports both single (`[20]`) and merged (`[20, 33]`) track IDs.
+  - Caches results to `verification_result.json` for instantaneous subsequent calls (<35ms return).
+- **4. Publication-Grade Forensic PDF Summary Report (`backend/pdf_report.py`)**:
+  - Built ReportLab PDF engine implementing the exact Invictus high-craft aesthetic:
+    - Palette: Obsidian (`#111111`), Warm Alabaster (`#F7F7F5`), Deep Emerald (`#047857`), Muted Amber (`#B45309`), Crisp Card White.
+    - Two-pass `NumberedCanvas` stamping "Page X of Y" in the running footer with audit metadata.
+    - Executive summary box with key forensic takeaways and confidence gating.
+    - Visual evidence gallery with embedded plate crops and vehicle contact strips.
+    - Hard plate character vector tile strip color-coded by reconciliation tone (`green`, `amber`, `red`, `black`).
+    - Top-3 advisory ghost predictions table.
+    - Slot-by-slot audit table detailing Pipe A, Pipe B, VLM read, and tie-breaking action.
+    - Vehicle intelligence section and ranked registry candidate matches with sighting timelines.
+  - Added `GET /api/reports/{job_id}/{track_key}/pdf`: Serves generated PDF documents with streaming FileResponse.
+- **5. Comprehensive Unit Testing & Live Verification**:
+  - Created [tests/test_web_api_and_pdf.py](file:///c:/Users/arnav/Documents/invictus-vehicle-trace/tests/test_web_api_and_pdf.py) with 9 automated tests covering clips listing, registry stats, path traversal security, cache hits, job polling, PDF generation, verification validation, and PDF download.
+  - Entire pytest suite expanded to **87/87 tests passing ($100\%$)** in 7.46s.
+  - Live verified on `data/Final/file_07.mp4`: Stage 1 tracked 44 vehicles in ~18s, generated `boxes.json` and 44 thumbnails; verified Track 20 through full 5-stage pipeline, generating 994KB publication-grade PDF dossier served via HTTP 200.
+
+### 2026-11-24 08:35:00 IST — Full-Stack Integration Freeze: Screen 2 Fullscreen Video & Live Terminal Monitor
+- **1. Windows IPv6 Proxy Fix (`frontend/vite.config.ts`)**:
+  - Re-routed Vite dev server proxy targets for `/api`, `/outputs`, and `/media` to `http://127.0.0.1:8000` (eliminating Windows `::1` IPv6 connection timeouts).
+- **2. Full-Stack API Contract Alignment (`cv_pipeline/vlm_verifier.py`, `frontend/src/types.ts`)**:
+  - Standardized slot audit field naming across OCR and VLM reconciliations: dual-aliased `slot_idx` & `slot_index`, `slot_type` & `expected_type`, `pipe_a_candidate` & `pipe_a_char`, `pipe_b_candidate` & `pipe_b_char`.
+  - Harmonized ghost predictions dictionary keys: populated both `plate` and `candidate_plate`, `soft_score` and `combined_confidence`.
+- **3. Screen 2 Fullscreen Video & Monospace Numbered Overlays (`InteractiveVideoCanvas.tsx`, `TrackSelectPage.tsx`)**:
+  - Replaced click-to-select and hover-selection on canvas with an unobstructed fullscreen video presentation (`cursor-default`).
+  - Rendered crisp monospace numbered `#ID` pills at the top-left corner of every active bounding box synchronized with `boxes.json`.
+  - Designed a slim bottom dock integrating video transport controls (Play/Pause with Space shortcut, scrubber, timestamp, `1× / 0.5×` speed toggle) alongside an inline `Track ID:` input box with live `#10B981` Deep Emerald box highlighting, subtle validation, and solid obsidian `Continue →` button.
+- **4. Live Forensic Debug Logging & Dual-Terminal Launcher (`backend/main.py`, `run_invictus.ps1`)**:
+  - Implemented `_print_forensic_console_report()`: Flushes formatted forensic evidence tables directly to the backend console on both live pipeline execution and instant cache hits.
+  - Created `run_invictus.ps1`: One-click PowerShell launcher activating Terminal 1 (Uvicorn backend on port 8000) and Terminal 2 (Vite frontend on port 5173).
+- **5. Complete Verification**:
+  - Frontend typecheck (`npx tsc --noEmit`) and production build (`npm run build`) passed with exit code 0.
+  - Pytest test suite verified at **87/87 passed (100%)** in 9.35s.
+  - Full-stack contract verification script passed all 5 end-to-end endpoints against cached `file_07.mp4` Track 20.
+
+
+

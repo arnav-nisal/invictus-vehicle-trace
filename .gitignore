@@ -29,9 +29,11 @@ build/
 *.mov
 *.mkv
 data/clips/
+data/Final/
 
 # Output Directories & Generated Visuals
 outputs/
+test_outputs/
 runs/
 
 # Environment & Config Secrets
@@ -49,5 +51,7 @@ Thumbs.db
 .agent/
 .agents/skills/
 node_modules/
+frontend/node_modules/
+frontend/dist/
 
 invictus-vehicle-trace.rar
