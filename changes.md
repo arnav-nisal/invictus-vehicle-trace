@@ -495,4 +495,23 @@ Chronological record of repository setup, pipeline iterations, engineering bugfi
   - Entire pytest suite expanded to **87/87 tests passing ($100\%$)** in 7.46s.
   - Live verified on `data/Final/file_07.mp4`: Stage 1 tracked 44 vehicles in ~18s, generated `boxes.json` and 44 thumbnails; verified Track 20 through full 5-stage pipeline, generating 994KB publication-grade PDF dossier served via HTTP 200.
 
+### 2026-11-24 08:35:00 IST — Full-Stack Integration Freeze: Screen 2 Fullscreen Video & Live Terminal Monitor
+- **1. Windows IPv6 Proxy Fix (`frontend/vite.config.ts`)**:
+  - Re-routed Vite dev server proxy targets for `/api`, `/outputs`, and `/media` to `http://127.0.0.1:8000` (eliminating Windows `::1` IPv6 connection timeouts).
+- **2. Full-Stack API Contract Alignment (`cv_pipeline/vlm_verifier.py`, `frontend/src/types.ts`)**:
+  - Standardized slot audit field naming across OCR and VLM reconciliations: dual-aliased `slot_idx` & `slot_index`, `slot_type` & `expected_type`, `pipe_a_candidate` & `pipe_a_char`, `pipe_b_candidate` & `pipe_b_char`.
+  - Harmonized ghost predictions dictionary keys: populated both `plate` and `candidate_plate`, `soft_score` and `combined_confidence`.
+- **3. Screen 2 Fullscreen Video & Monospace Numbered Overlays (`InteractiveVideoCanvas.tsx`, `TrackSelectPage.tsx`)**:
+  - Replaced click-to-select and hover-selection on canvas with an unobstructed fullscreen video presentation (`cursor-default`).
+  - Rendered crisp monospace numbered `#ID` pills at the top-left corner of every active bounding box synchronized with `boxes.json`.
+  - Designed a slim bottom dock integrating video transport controls (Play/Pause with Space shortcut, scrubber, timestamp, `1× / 0.5×` speed toggle) alongside an inline `Track ID:` input box with live `#10B981` Deep Emerald box highlighting, subtle validation, and solid obsidian `Continue →` button.
+- **4. Live Forensic Debug Logging & Dual-Terminal Launcher (`backend/main.py`, `run_invictus.ps1`)**:
+  - Implemented `_print_forensic_console_report()`: Flushes formatted forensic evidence tables directly to the backend console on both live pipeline execution and instant cache hits.
+  - Created `run_invictus.ps1`: One-click PowerShell launcher activating Terminal 1 (Uvicorn backend on port 8000) and Terminal 2 (Vite frontend on port 5173).
+- **5. Complete Verification**:
+  - Frontend typecheck (`npx tsc --noEmit`) and production build (`npm run build`) passed with exit code 0.
+  - Pytest test suite verified at **87/87 passed (100%)** in 9.35s.
+  - Full-stack contract verification script passed all 5 end-to-end endpoints against cached `file_07.mp4` Track 20.
+
+
 

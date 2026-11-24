@@ -51,5 +51,7 @@ Thumbs.db
 .agent/
 .agents/skills/
 node_modules/
+frontend/node_modules/
+frontend/dist/
 
 invictus-vehicle-trace.rar

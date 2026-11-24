@@ -267,9 +267,83 @@ def _build_stage1_result(clip_stem: str, video_path: Path, tracks_summary: Dict[
     }
 
 
+def _print_forensic_console_report(res: Dict[str, Any]):
+    """Print the exact forensic report table directly to the backend terminal."""
+    case_id = res.get("case_id", "UNKNOWN")
+    job_id = res.get("job_id", "")
+    track_key = res.get("track_key", "")
+    target_id = res.get("target_id", 0)
+    merged_ids = res.get("merged_track_ids", [target_id])
+    is_merged = res.get("is_merged_track", False)
+    plate_data = res.get("plate", {})
+    final_plate = plate_data.get("final_plate", "??????????")
+    overall_conf = plate_data.get("overall_confidence", 0.0)
+    prov = plate_data.get("provider_used", "none")
+    model = plate_data.get("model_used", "none")
+    veh = res.get("vehicle", {})
+    matches = res.get("registry_matches", [])
+
+    print("\n" + "=" * 95, flush=True)
+    print(f"  INVICTUS FORENSIC EVIDENCE REPORT | {case_id}", flush=True)
+    if is_merged:
+        print(f"  Target: Track #{target_id} (Merged IDs: {', '.join(str(x) for x in merged_ids)}) | Video: {job_id}", flush=True)
+    else:
+        print(f"  Target: Track #{target_id} | Video: {job_id}", flush=True)
+    print(f"  Hard Reconciled Plate:  {final_plate}  (Overall Confidence: {overall_conf:.2f}, Provider: {prov}/{model})", flush=True)
+    print("=" * 95, flush=True)
+    print(f"  {'Slot':<4} | {'Type':<6} | {'Pipe A':<14} | {'Pipe B':<14} | {'Blind VLM':<14} | {'Tone':<7} | {'Final':<5} | {'Ghost Stack'}", flush=True)
+    print("  " + "-" * 91, flush=True)
+
+    slots = plate_data.get("reconciled_slots", [])
+    for s in slots:
+        idx = s.get("slot_idx", s.get("slot_index", 0))
+        st = s.get("slot_type", s.get("expected_type", "?"))
+        pa = s.get("pipe_a_candidate") or s.get("pipe_a_char") or "--"
+        pa_conf = s.get("pipe_a_conf", 0.0)
+        pa_str = f"{pa} ({pa_conf:.2f})" if pa != "--" and pa != "?" else (pa if pa != "?" else "--")
+
+        pb = s.get("pipe_b_candidate") or s.get("pipe_b_char") or "--"
+        pb_conf = s.get("pipe_b_conf", 0.0)
+        pb_str = f"{pb} ({pb_conf:.2f})" if pb != "--" and pb != "?" else (pb if pb != "?" else "--")
+
+        vlm_c = s.get("vlm_blind_raw_char") or s.get("vlm_char") or "--"
+        vlm_conf = s.get("vlm_conf", 0.0)
+        vlm_str = f"{vlm_c} ({vlm_conf:.2f})" if vlm_c != "--" and vlm_c != "?" else (vlm_c if vlm_c != "?" else "--")
+
+        tone = s.get("ui_tile_tone", "--")
+        fc = s.get("final_char", "?")
+
+        ghosts = s.get("ghost_stack", [])
+        ghost_str = ", ".join(f"{g.get('char')}({g.get('soft_score', 0):.2f})" for g in ghosts) if ghosts else "-"
+        print(f"  {idx:<4} | {st:<6} | {pa_str:<14} | {pb_str:<14} | {vlm_str:<14} | {tone:<7} | {fc:<5} | {ghost_str}", flush=True)
+
+    print("=" * 95, flush=True)
+
+    ghost_preds = plate_data.get("ghost_predictions", [])
+    if ghost_preds:
+        print("  Top-3 Ghost Predictions (Advisory Operator Re-Ranking):", flush=True)
+        print(f"  {'Rank':<4} | {'Plate':<12} | {'Soft Score':<10} | {'Valid RTO':<9} | {'Ghost Slot Indices'}", flush=True)
+        print("  " + "-" * 65, flush=True)
+        for gp in ghost_preds[:3]:
+            r = gp.get("rank", 1)
+            p = gp.get("plate", "??????????")
+            sc = gp.get("soft_score", 0.0)
+            vr = gp.get("state_code_valid", False)
+            g_slots = gp.get("ghost_slot_indices", [])
+            print(f"  {r:<4} | {p:<12} | {sc:<10.3f} | {str(vr):<9} | {g_slots}", flush=True)
+        print("=" * 95, flush=True)
+
+    print(f"  STAGE 3 VEHICLE ATTRIBUTES: {veh.get('colour', 'Unknown')} {veh.get('make', '')} {veh.get('model', '')} ({veh.get('body_type', 'car')})", flush=True)
+    if matches:
+        top_m = matches[0]
+        print(f"  TOP REGISTRY MATCH: #{top_m.get('rank')} {top_m.get('plate_number')} · {round(top_m.get('total_confidence', 0)*100)}% Match · {top_m.get('owner_name')} ({top_m.get('registered_rto')})", flush=True)
+    print("=" * 95 + "\n", flush=True)
+
+
 def _run_stage1_background_job(clip_stem: str, video_path: Path):
     """Worker function running fast Stage 1 tracking in background thread."""
     try:
+        print(f"\n[STAGE 1] Ingesting video: {video_path.name} (Job: {clip_stem})...", flush=True)
         clip_out_dir = OUTPUTS_DIR / clip_stem
         clip_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -297,16 +371,18 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             "progress": 40,
             "message": "Tracking vehicles with YOLO + BoT-SORT...",
         })
-
+        print(f"[STAGE 1] Running BoT-SORT GPU tracking on {video_path.name}...", flush=True)
         summary = pipeline.run(str(video_path), write_video=False)
+        print(f"[STAGE 1] Tracking complete: {len(summary.get('tracks', []))} clean vehicles recorded.", flush=True)
 
         JOBS[clip_stem].update({
             "stage_step": 3,
             "progress": 85,
             "message": "Generating bounding boxes & thumbnails...",
         })
-
+        print(f"[STAGE 1] Generating web bounding boxes and thumbnails...", flush=True)
         build_web_artifacts(clip_stem, clip_out_dir, video_path)
+        print(f"[STAGE 1] Web artifacts ready -> boxes.json + thumbnails generated.", flush=True)
 
         summ_path = clip_out_dir / "tracks_summary.json"
         with open(summ_path, "r", encoding="utf-8") as f:
@@ -322,8 +398,10 @@ def _run_stage1_background_job(clip_stem: str, video_path: Path):
             "error": None,
             "result": result,
         })
+        print(f"[STAGE 1] Job '{clip_stem}' completed successfully.\n", flush=True)
     except Exception as e:
         logger.error(f"Background Stage 1 job for {clip_stem} failed: {e}", exc_info=True)
+        print(f"[STAGE 1 ERROR] Job '{clip_stem}' failed: {e}", flush=True)
         JOBS[clip_stem] = {
             "job_id": clip_stem,
             "status": "error",
@@ -700,6 +778,8 @@ async def select_local_video(payload: SelectLocalRequest = Body(...)) -> Dict[st
     boxes_path = clip_out_dir / "boxes.json"
     summ_path = clip_out_dir / "tracks_summary.json"
 
+    print(f"\n[API] select-local: '{fn}' (cached: {boxes_path.is_file() and summ_path.is_file()})", flush=True)
+
     # Instant Cache Hit
     if boxes_path.is_file() and summ_path.is_file() and not payload.force_refresh:
         try:
@@ -822,6 +902,8 @@ async def verify_pipeline_track(payload: PipelineVerifyRequest = Body(...)) -> D
                     generate_forensic_pdf(cached_res, pdf_path, track_dir=track_dir)
                 except Exception as e:
                     logger.warning(f"Could not generate PDF on cache hit: {e}")
+            print(f"[CACHE HIT] Returning verified results for {job_id}/{track_key} (<0.04s)", flush=True)
+            _print_forensic_console_report(cached_res)
             return cached_res
         except Exception as e:
             logger.warning(f"Failed to read cached verification result: {e}")
@@ -1029,6 +1111,7 @@ async def verify_pipeline_track(payload: PipelineVerifyRequest = Body(...)) -> D
     except Exception as e:
         logger.error(f"Failed to generate PDF for {track_key}: {e}", exc_info=True)
 
+    _print_forensic_console_report(ver_result)
     return ver_result
 
 

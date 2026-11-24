@@ -602,7 +602,9 @@ def compute_ghost_predictions(
         total_score = round(base_score + bonus, 3)
         scored_hypotheses.append({
             "plate": plate_str,
+            "candidate_plate": plate_str,
             "soft_score": total_score,
+            "combined_confidence": total_score,
             "state_code_valid": state_valid,
             "ghost_slot_indices": ghost_indices,
         })
@@ -673,10 +675,15 @@ def reconcile_vlm_with_ocr(
             )
             reconciled_slots.append({
                 "slot_idx": s.get("slot", i),
+                "slot_index": s.get("slot", i),
+                "slot_type": s.get("slot_type", "UNKNOWN"),
+                "expected_type": s.get("slot_type", "UNKNOWN"),
                 "ocr_char": c,
                 "ocr_bucket": bucket,
                 "pipe_a_candidate": s.get("pipe_a_top", "?"),
                 "pipe_b_candidate": s.get("pipe_b_top", "?"),
+                "pipe_a_char": s.get("pipe_a_top", "?"),
+                "pipe_b_char": s.get("pipe_b_top", "?"),
                 "vlm_char": None,
                 "vlm_blind_raw_char": None,
                 "vlm_disambiguated_char": None,
@@ -684,6 +691,7 @@ def reconcile_vlm_with_ocr(
                 "vlm_legible": False,
                 "final_char": c,
                 "final_char_soft_score": float(s.get("combined_conf", 0.0)),
+                "final_confidence": float(s.get("combined_conf", 0.0)),
                 "action": "FALLBACK_STAGE_2_3_OCR",
                 "ui_tile_tone": tone,
                 "ghost_stack": [],
@@ -931,10 +939,15 @@ def reconcile_vlm_with_ocr(
 
         slot_data = {
             "slot_idx": i,
+            "slot_index": i,
             "ocr_char": ocr_char,
             "ocr_bucket": ocr_bucket,
+            "slot_type": slot_type,
+            "expected_type": slot_type,
             "pipe_a_candidate": pipe_a_cand,
             "pipe_b_candidate": pipe_b_cand,
+            "pipe_a_char": pipe_a_cand,
+            "pipe_b_char": pipe_b_cand,
             "vlm_char": v_char,
             "vlm_blind_raw_char": vlm_blind_raw_char,
             "vlm_disambiguated_char": vlm_disambiguated_char,
